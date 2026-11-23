@@ -1,0 +1,6 @@
+{
+  "name": "PixelForge",
+  "description": "Studio to import spritesheets, 3D models, textures, concept art, and text descriptions to craft full detail 2D sprites and 3D models.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
