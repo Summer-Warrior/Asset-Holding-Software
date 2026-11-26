@@ -231,7 +231,8 @@ object GeminiAssetForge {
         hardwareName: String,
         baseMesh: Mesh3D,
         baseSpriteSheet: SpriteSheetData,
-        explicitCharacterTag: String
+        explicitCharacterTag: String,
+        sharedContextBlock: String = ""
     ): GeminiForgeReport {
         val effectivePrompt = buildString {
             appendLine("You are the PixelForge Studio Lead Technical Artist & Game Asset Architect.")
@@ -261,24 +262,50 @@ object GeminiAssetForge {
             if (inputBitmap != null && inputSource != GeminiInputImageSource.DESCRIPTION_ONLY) {
                 appendLine("Attached Visual Asset Source: ${inputSource.label} (${inputBitmap.width}x${inputBitmap.height}px). Inspect its colors, forms, silhouette, and visual details closely.")
             }
+            appendLine("Return strict JSON with keys: enhancedTitle, characterIdentity, technicalEnhancementSummary, enhancedLoreSpec, recommendedArchetype (STARFIGHTER|CYBER_MECH|TREASURE_CHEST|CRYSTAL_ARTIFACT|VOXEL_RELIEF), geometryScaleX, geometryScaleY, geometryScaleZ, extrusionDepthBoost, addWingsOrFins, addOrbitalRing, paletteHexColors (array of 6 #RRGGBB strings), and variants (array of 3-4 objects with variantName, variantBadge, technicalBreakdown, loreDescription, archetype, primaryHex, secondaryHex, accentHex, scaleX, scaleY, scaleZ, addWingsOrFins, addOrbitalRing).")
         }
 
-        val response = withTimeout(60_000L) {
-            if (inputBitmap != null && inputSource != GeminiInputImageSource.DESCRIPTION_ONLY) {
-                val scaled = scaleBitmapForInference(inputBitmap, maxDimension = 1024)
-                structuredForgeModel.generateContent(
-                    content {
-                        image(scaled)
-                        text(effectivePrompt)
+        val scaledBitmap = if (inputBitmap != null && inputSource != GeminiInputImageSource.DESCRIPTION_ONLY) {
+            scaleBitmapForInference(inputBitmap, maxDimension = 1024)
+        } else {
+            null
+        }
+
+        val omniResponse = OmniAiRouter.generateTextOrJson(
+            role = AiTaskRole.TEXT_AND_SPECS,
+            prompt = effectivePrompt,
+            systemInstruction = "You are PixelForge Studio Lead Technical Artist. Always return valid JSON only.",
+            imageBitmap = scaledBitmap,
+            expectJson = true,
+            sharedContextBlock = sharedContextBlock,
+            firebaseDelegate = { combinedPrompt, bmp ->
+                val response = withTimeout(60_000L) {
+                    if (bmp != null) {
+                        structuredForgeModel.generateContent(
+                            content {
+                                image(bmp)
+                                text(combinedPrompt)
+                            }
+                        )
+                    } else {
+                        structuredForgeModel.generateContent(combinedPrompt)
                     }
-                )
-            } else {
-                structuredForgeModel.generateContent(effectivePrompt)
+                }
+                response.text?.trim()
+                    ?: throw IllegalStateException("Gemini returned an empty response.")
             }
+        )
+
+        val rawJson = omniResponse.text.trim()
+        if (rawJson.isEmpty()) {
+            throw IllegalStateException("${omniResponse.providerUsed.defaultDisplayName} returned an empty response.")
         }
 
-        val rawJson = response.text?.trim()
-            ?: throw IllegalStateException("Gemini returned an empty response.")
+        val resolvedModelLabel = if (omniResponse.providerUsed == AiProviderType.FIREBASE_STUDIO) {
+            "gemini-3.8-flash"
+        } else {
+            "${omniResponse.providerUsed.name}:${omniResponse.modelIdUsed}"
+        }
 
         return parseStructuredForgeResponse(
             rawJson = rawJson,
@@ -287,7 +314,7 @@ object GeminiAssetForge {
             baseMesh = baseMesh,
             baseSpriteSheet = baseSpriteSheet,
             fallbackCharacterTag = explicitCharacterTag.ifBlank { "Kaelen" }
-        )
+        ).copy(modelNameUsed = resolvedModelLabel)
     }
 
     /**
@@ -302,7 +329,8 @@ object GeminiAssetForge {
         inputSource: GeminiInputImageSource,
         theme: ArtTheme,
         hardwareName: String,
-        explicitCharacterTag: String
+        explicitCharacterTag: String,
+        sharedContextBlock: String = ""
     ): GeminiForgeReport {
         val imagePrompt = buildString {
             append("Create a crisp, high-contrast video game character or vehicle asset sprite/concept illustration ")
@@ -321,22 +349,41 @@ object GeminiAssetForge {
             }
         }
 
-        val generatedBitmap = withTimeout(60_000L) {
-            val response = if (inputBitmap != null && inputSource != GeminiInputImageSource.DESCRIPTION_ONLY) {
-                val scaledInput = scaleBitmapForInference(inputBitmap, maxDimension = 1024)
-                imageSynthesisModel.generateContent(
-                    content {
-                        image(scaledInput)
-                        text(imagePrompt)
+        val scaledRef = if (inputBitmap != null && inputSource != GeminiInputImageSource.DESCRIPTION_ONLY) {
+            scaleBitmapForInference(inputBitmap, maxDimension = 1024)
+        } else {
+            null
+        }
+
+        val omniImage = OmniAiRouter.generateImageBitmap(
+            prompt = imagePrompt,
+            referenceBitmap = scaledRef,
+            sharedContextBlock = sharedContextBlock,
+            firebaseImageDelegate = { combinedPrompt, refBmp ->
+                withTimeout(60_000L) {
+                    val response = if (refBmp != null) {
+                        imageSynthesisModel.generateContent(
+                            content {
+                                image(refBmp)
+                                text(combinedPrompt)
+                            }
+                        )
+                    } else {
+                        imageSynthesisModel.generateContent(combinedPrompt)
                     }
-                )
-            } else {
-                imageSynthesisModel.generateContent(imagePrompt)
+                    response.candidates.firstOrNull()
+                        ?.content?.parts?.filterIsInstance<ImagePart>()
+                        ?.firstOrNull()?.image
+                } ?: throw IllegalStateException("No image was returned by gemini-nano-banana-2.1.")
             }
-            response.candidates.firstOrNull()
-                ?.content?.parts?.filterIsInstance<ImagePart>()
-                ?.firstOrNull()?.image
-        } ?: throw IllegalStateException("No image was returned by gemini-nano-banana-2.1.")
+        )
+
+        val generatedBitmap = omniImage.bitmap
+        val resolvedModelLabel = if (omniImage.providerUsed == AiProviderType.FIREBASE_STUDIO) {
+            "gemini-nano-banana-2.1"
+        } else {
+            "${omniImage.providerUsed.name}:${omniImage.modelIdUsed}"
+        }
 
         val charName = explicitCharacterTag.ifBlank { "Kaelen" }
         val enhancedTitle = "$charName • AI Visual Synthesis"
@@ -369,7 +416,7 @@ object GeminiAssetForge {
                 variantName = "$charName • AI Relief Primary",
                 variantBadge = "AI RENDER",
                 characterTag = charName,
-                technicalBreakdown = "Direct 28×28 luminance depth extrusion and 32px outlined sprite synthesis from gemini-nano-banana-2.1 output.",
+                technicalBreakdown = "Direct 28×28 luminance depth extrusion and 32px outlined sprite synthesis from $resolvedModelLabel output.",
                 loreDescription = "Synthesized visual concept variant for $promptDescription.",
                 archetype = "VOXEL_RELIEF",
                 primaryHex = primaryColor,
@@ -390,7 +437,7 @@ object GeminiAssetForge {
                 variantBadge = "OVERCLOCKED",
                 characterTag = charName,
                 technicalBreakdown = "Adds swept plasma wings and orbital halo ring to the AI-synthesized relief mesh with boosted Z-depth.",
-                loreDescription = "Awakened high-output combat variant derived from the Gemini visual synthesis.",
+                loreDescription = "Awakened high-output combat variant derived from the AI visual synthesis.",
                 archetype = "VOXEL_RELIEF",
                 primaryHex = accentColor,
                 secondaryHex = secondaryColor,
@@ -410,7 +457,7 @@ object GeminiAssetForge {
             operationMode = GeminiOperationMode.AI_IMAGE_SYNTHESIS,
             enhancedTitle = enhancedTitle,
             characterIdentity = charName,
-            technicalEnhancementSummary = "Synthesized a ${generatedBitmap.width}×${generatedBitmap.height}px visual asset via gemini-nano-banana-2.1, extracted ${extractedPalette.size} dominant shader swatches, extruded a ${reliefMesh.vertexCount}-vertex 3D relief mesh, and quantized an outlined 2D sprite.",
+            technicalEnhancementSummary = "Synthesized a ${generatedBitmap.width}×${generatedBitmap.height}px visual asset via $resolvedModelLabel, extracted ${extractedPalette.size} dominant shader swatches, extruded a ${reliefMesh.vertexCount}-vertex 3D relief mesh, and quantized an outlined 2D sprite.",
             enhancedLoreSpec = "Generated from prompt: \"$promptDescription\" ${if (customInstruction.isNotBlank()) "with instruction: \"$customInstruction\"" else ""}.",
             primaryMesh = reliefMesh,
             primarySpriteSheet = synthesizedSheet,
@@ -418,7 +465,7 @@ object GeminiAssetForge {
             variants = variants,
             aiSynthesizedBitmap = generatedBitmap,
             usedImageInput = inputBitmap != null && inputSource != GeminiInputImageSource.DESCRIPTION_ONLY,
-            modelNameUsed = "gemini-nano-banana-2.1"
+            modelNameUsed = resolvedModelLabel
         )
     }
 

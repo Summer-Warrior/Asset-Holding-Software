@@ -2,10 +2,14 @@ package com.example
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.AiImportSpriteSheetReviewer
+import com.example.ai.AiProviderProfile
+import com.example.ai.AiProviderType
 import com.example.ai.AiSpriteSheetReviewResult
+import com.example.ai.AiTaskRole
 import com.example.ai.ArtTheme
 import com.example.ai.AssetTarget
 import com.example.ai.GeminiAssetForge
@@ -14,6 +18,12 @@ import com.example.ai.GeminiForgeReport
 import com.example.ai.GeminiForgeUiState
 import com.example.ai.GeminiInputImageSource
 import com.example.ai.GeminiOperationMode
+import com.example.ai.KnowledgeSourceEntry
+import com.example.ai.MultiSourceContextRegistry
+import com.example.ai.OmniAiRouter
+import com.example.ai.OmniAiRoutingConfig
+import com.example.ai.OpenRouterPkceHelper
+import com.example.ai.OpenRouterPkceResult
 import com.example.data.local.AssetGalleryEntity
 import com.example.data.local.AssetGalleryItemEntity
 import com.example.data.local.AssetGalleryRepository
@@ -126,7 +136,13 @@ data class AppUiState(
     val isReviewingImportedFileWithAi: Boolean = false,
     // Custom Asset Galleries & Exhibitions
     val assetGalleries: List<AssetGalleryWithItems> = emptyList(),
-    val selectedGalleryId: Long? = null
+    val selectedGalleryId: Long? = null,
+    // Multi-AI & Multi-Source Hub (UI-safe profiles; never stores raw API keys)
+    val aiProviderProfiles: List<AiProviderProfile> = OmniAiRouter.getAllProviderProfiles(),
+    val omniAiRouting: OmniAiRoutingConfig = OmniAiRouter.getRoutingConfig(),
+    val knowledgeSources: List<KnowledgeSourceEntry> = OmniAiRouter.getContextRegistry().getSources(),
+    val isSigningInOpenRouterPkce: Boolean = false,
+    val isFetchingKnowledgeUrl: Boolean = false
 )
 
 class MainViewModel(
@@ -341,6 +357,8 @@ class MainViewModel(
     fun attachDatabaseContext(context: Context) {
         val appCtx = context.applicationContext
         this.appContext = appCtx
+        OmniAiRouter.attachContext(appCtx)
+        refreshOmniAiHubState()
         val db = PixelForgeDatabase.getDatabase(appCtx)
         attachHistoryRepository(AssetHistoryRepository(db.assetHistoryDao(), appCtx))
         attachGalleryRepository(AssetGalleryRepository(db.assetGalleryDao(), appCtx))
@@ -1451,12 +1469,17 @@ class MainViewModel(
         preferCloudVision: Boolean = true
     ): AiSpriteSheetReviewResult {
         _uiState.update { it.copy(isReviewingImportedFileWithAi = true) }
+        val sharedContext = assembleSharedOmniContextBlock(
+            queryHint = "$fileName spritesheet grid ${_uiState.value.activeCharacterTagForImports}",
+            maxChars = MultiSourceContextRegistry.DEFAULT_MAX_CONTEXT_CHARS
+        )
         val review = AiImportSpriteSheetReviewer.reviewImportedFile(
             bitmap = bitmap,
             fileName = fileName,
             userRequestedColumns = requestedCols,
             userRequestedRows = requestedRows,
-            preferCloudVision = preferCloudVision
+            preferCloudVision = preferCloudVision,
+            sharedContextBlock = sharedContext
         )
         _uiState.update { state ->
             val alertMsg = if (review.isSpriteSheetInSingleImage) {
@@ -1794,6 +1817,10 @@ class MainViewModel(
             }
 
             try {
+                val sharedContext = assembleSharedOmniContextBlock(
+                    queryHint = "${snapshot.promptText} ${snapshot.geminiCustomInstruction} ${snapshot.activeCharacterTagForImports}",
+                    maxChars = MultiSourceContextRegistry.DEFAULT_MAX_CONTEXT_CHARS
+                )
                 val report = if (mode == GeminiOperationMode.AI_IMAGE_SYNTHESIS) {
                     GeminiAssetForge.synthesizeAiVariantImageWithGemini(
                         promptDescription = snapshot.promptText,
@@ -1802,7 +1829,8 @@ class MainViewModel(
                         inputSource = source,
                         theme = snapshot.selectedTheme,
                         hardwareName = snapshot.selectedHardware.name,
-                        explicitCharacterTag = snapshot.activeCharacterTagForImports
+                        explicitCharacterTag = snapshot.activeCharacterTagForImports,
+                        sharedContextBlock = sharedContext
                     )
                 } else {
                     GeminiAssetForge.enhanceOrGenerateVariantsWithGemini(
@@ -1815,7 +1843,8 @@ class MainViewModel(
                         hardwareName = snapshot.selectedHardware.name,
                         baseMesh = snapshot.currentMesh,
                         baseSpriteSheet = snapshot.currentSpriteSheet,
-                        explicitCharacterTag = snapshot.activeCharacterTagForImports
+                        explicitCharacterTag = snapshot.activeCharacterTagForImports,
+                        sharedContextBlock = sharedContext
                     )
                 }
 
@@ -2566,6 +2595,206 @@ class MainViewModel(
 
     fun dismissStatusMessage() {
         _uiState.update { it.copy(statusMessage = null) }
+    }
+
+    // -------------------------------------------------------------------------
+    // Multi-AI & Multi-Source Hub State Management
+    // -------------------------------------------------------------------------
+
+    fun refreshOmniAiHubState() {
+        _uiState.update { state ->
+            state.copy(
+                aiProviderProfiles = OmniAiRouter.getAllProviderProfiles(),
+                omniAiRouting = OmniAiRouter.getRoutingConfig(),
+                knowledgeSources = OmniAiRouter.getContextRegistry().getSources()
+            )
+        }
+    }
+
+    fun setActiveAiProviderForRole(role: AiTaskRole, provider: AiProviderType) {
+        if (role == AiTaskRole.IMAGE_GENERATION && !provider.supportsImageGeneration) {
+            postStatusMessage("${provider.defaultDisplayName} does not support direct image generation.")
+            return
+        }
+        val updatedRouting = OmniAiRouter.setActiveProviderForRole(role, provider)
+        _uiState.update {
+            it.copy(
+                omniAiRouting = updatedRouting,
+                statusMessage = "${role.label} AI set to ${provider.defaultDisplayName}"
+            )
+        }
+    }
+
+    fun saveAiProviderCredential(provider: AiProviderType, secret: String) {
+        OmniAiRouter.saveProviderCredential(provider, secret)
+        refreshOmniAiHubState()
+        postStatusMessage("Saved encrypted key for ${provider.defaultDisplayName}")
+    }
+
+    fun clearAiProviderCredential(provider: AiProviderType) {
+        OmniAiRouter.clearProviderCredential(provider)
+        refreshOmniAiHubState()
+        postStatusMessage("Cleared saved key for ${provider.defaultDisplayName}")
+    }
+
+    fun updateAiProviderSettings(
+        provider: AiProviderType,
+        textModelId: String? = null,
+        imageModelId: String? = null,
+        baseUrl: String? = null,
+        markLocalConnected: Boolean? = null
+    ) {
+        OmniAiRouter.updateProviderSettings(
+            provider = provider,
+            textModelId = textModelId,
+            imageModelId = imageModelId,
+            baseUrl = baseUrl,
+            markLocalConnected = markLocalConnected
+        )
+        refreshOmniAiHubState()
+        postStatusMessage("Updated ${provider.defaultDisplayName} settings")
+    }
+
+    fun startOpenRouterPkceSignIn(onLaunchAuthUrl: (String) -> Unit) {
+        if (_uiState.value.isSigningInOpenRouterPkce) return
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isSigningInOpenRouterPkce = true,
+                    statusMessage = "Opening OpenRouter PKCE sign-in in browser..."
+                )
+            }
+            val result = OpenRouterPkceHelper.signInWithLoopbackPkce(
+                vault = OmniAiRouter.getVault(),
+                onLaunchAuthUrl = { session -> onLaunchAuthUrl(session.authUrl) }
+            )
+            when (result) {
+                is OpenRouterPkceResult.Success -> {
+                    OmniAiRouter.setActiveProviderForRole(AiTaskRole.TEXT_AND_SPECS, AiProviderType.OPENROUTER)
+                    _uiState.update {
+                        it.copy(
+                            isSigningInOpenRouterPkce = false,
+                            aiProviderProfiles = OmniAiRouter.getAllProviderProfiles(),
+                            omniAiRouting = OmniAiRouter.getRoutingConfig(),
+                            statusMessage = "Connected OpenRouter via PKCE (${result.accountHint})!"
+                        )
+                    }
+                }
+                is OpenRouterPkceResult.Failure -> {
+                    _uiState.update {
+                        it.copy(
+                            isSigningInOpenRouterPkce = false,
+                            statusMessage = result.reason
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun toggleKnowledgeSource(id: String, enabled: Boolean) {
+        val updated = OmniAiRouter.getContextRegistry().toggleSource(id, enabled)
+        _uiState.update { it.copy(knowledgeSources = updated) }
+    }
+
+    fun removeKnowledgeSource(id: String) {
+        val updated = OmniAiRouter.getContextRegistry().removeSource(id)
+        _uiState.update {
+            it.copy(
+                knowledgeSources = updated,
+                statusMessage = "Removed knowledge source from AI Hub"
+            )
+        }
+    }
+
+    fun addPastedKnowledgeSource(title: String, content: String) {
+        if (content.isBlank()) return
+        val updated = OmniAiRouter.getContextRegistry().addPastedNoteSource(
+            title = title,
+            content = content
+        )
+        _uiState.update {
+            it.copy(
+                knowledgeSources = updated,
+                statusMessage = "Attached shared knowledge source '${title.ifBlank { "Notebook Lore Notes" }}'"
+            )
+        }
+    }
+
+    fun importLocalKnowledgeDocument(context: Context, uri: Uri) {
+        viewModelScope.launch {
+            val res = OmniAiRouter.getContextRegistry().importLocalDocumentUri(context, uri)
+            res.fold(
+                onSuccess = { entry ->
+                    _uiState.update {
+                        it.copy(
+                            knowledgeSources = OmniAiRouter.getContextRegistry().getSources(),
+                            statusMessage = "Imported '${entry.title}' (${entry.content.length} chars) into Shared AI Sources!"
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    postStatusMessage("Failed to import document: ${err.message}")
+                }
+            )
+        }
+    }
+
+    fun addHttpsKnowledgeSource(url: String, customTitle: String = "") {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isFetchingKnowledgeUrl = true) }
+            val res = OmniAiRouter.getContextRegistry().fetchAndAddPublicHttpsSource(
+                rawUrl = url,
+                customTitle = customTitle
+            )
+            res.fold(
+                onSuccess = { entry ->
+                    _uiState.update {
+                        it.copy(
+                            isFetchingKnowledgeUrl = false,
+                            knowledgeSources = OmniAiRouter.getContextRegistry().getSources(),
+                            statusMessage = "Fetched & attached '${entry.title}' (${entry.content.length} chars)!"
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(
+                            isFetchingKnowledgeUrl = false,
+                            statusMessage = "Source URL rejected or failed: ${err.message}"
+                        )
+                    }
+                }
+            )
+        }
+    }
+
+    fun buildActiveProjectContextSummary(state: AppUiState = _uiState.value): String {
+        val paletteHex = state.extractedPalette.take(6).joinToString(", ") { it.hex }.ifBlank { "Default Studio" }
+        val galleryNames = state.assetGalleries.take(4).joinToString(", ") { it.gallery.name }
+        val charGroups = state.characterFusionGroups.take(4).joinToString(", ") { it.characterName }
+        return buildString {
+            appendLine("Active 3D Mesh: ${state.currentMesh.name} (${state.currentMesh.vertexCount}v/${state.currentMesh.faceCount}f, format=${state.currentMesh.sourceFormat})")
+            appendLine("Active 2D Spritesheet: ${state.currentSpriteSheet.name} (${state.currentSpriteSheet.columns}x${state.currentSpriteSheet.rows}, ${state.currentSpriteSheet.frames.size} frames)")
+            appendLine("Active Character Tag: ${state.activeCharacterTagForImports.ifBlank { "Studio" }}")
+            appendLine("Detected Character Groups: $charGroups")
+            appendLine("Hardware Target: ${state.selectedHardware.name} (${state.selectedHardware.shortName})")
+            appendLine("Active Palette: $paletteHex")
+            if (galleryNames.isNotBlank()) {
+                appendLine("Active Asset Galleries: $galleryNames")
+            }
+        }.trim()
+    }
+
+    fun assembleSharedOmniContextBlock(
+        queryHint: String = _uiState.value.promptText,
+        maxChars: Int = MultiSourceContextRegistry.DEFAULT_MAX_CONTEXT_CHARS
+    ): String {
+        return OmniAiRouter.getContextRegistry().assembleContextBlock(
+            queryHint = queryHint,
+            activeProjectSummary = buildActiveProjectContextSummary(),
+            maxChars = maxChars
+        )
     }
 
     companion object {

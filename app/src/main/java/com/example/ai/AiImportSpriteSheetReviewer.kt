@@ -97,7 +97,8 @@ object AiImportSpriteSheetReviewer {
         fileName: String,
         userRequestedColumns: Int,
         userRequestedRows: Int,
-        preferCloudVision: Boolean = true
+        preferCloudVision: Boolean = true,
+        sharedContextBlock: String = ""
     ): AiSpriteSheetReviewResult = withContext(Dispatchers.Default) {
         val localResult = analyzeSpriteSheetInSingleImageDeterministically(
             bitmap = bitmap,
@@ -118,19 +119,30 @@ object AiImportSpriteSheetReviewer {
                 appendLine("The user is currently importing it with grid settings: ${userRequestedColumns} columns x ${userRequestedRows} rows.")
                 appendLine("Local structural periodicity scan estimated: isSpriteSheet=${localResult.isSpriteSheetInSingleImage}, recommended=${localResult.recommendedColumns}x${localResult.recommendedRows} (${localResult.technicalGridEvidence}).")
                 appendLine("Check carefully if a multi-frame spritesheet (animation strip, character sheet, or tile atlas) is being added as a single picture image (1x1) or with wrong grid divisions.")
-                appendLine("Return accurate recommendedColumns and recommendedRows so the user can slice the single picture into proper animation frames in one tap.")
+                appendLine("Return strict JSON with keys: isSpriteSheetInSingleImage (boolean), recommendedColumns (1..16), recommendedRows (1..16), detectedFrameCount (int), confidencePercent (50..99), verdictTitle (string), aiReviewSummary (string), technicalGridEvidence (string).")
             }
 
-            val response = withTimeout(35_000L) {
-                geminiVisionReviewer.generateContent(
-                    content {
-                        image(scaledForAi)
-                        text(promptText)
+            val omniResponse = OmniAiRouter.generateTextOrJson(
+                role = AiTaskRole.VISION_REVIEW,
+                prompt = promptText,
+                systemInstruction = "You are a game spritesheet vision inspector. Return valid JSON only.",
+                imageBitmap = scaledForAi,
+                expectJson = true,
+                sharedContextBlock = sharedContextBlock,
+                firebaseDelegate = { combinedPrompt, bmp ->
+                    val response = withTimeout(35_000L) {
+                        geminiVisionReviewer.generateContent(
+                            content {
+                                if (bmp != null) image(bmp)
+                                text(combinedPrompt)
+                            }
+                        )
                     }
-                )
-            }
+                    response.text?.trim().orEmpty()
+                }
+            )
 
-            val rawJson = response.text?.trim().orEmpty()
+            val rawJson = omniResponse.text.trim()
             if (rawJson.isNotEmpty()) {
                 val root = JSONObject(rawJson)
                 val recCols = root.optInt("recommendedColumns", localResult.recommendedColumns).coerceIn(1, 16)
@@ -144,6 +156,11 @@ object AiImportSpriteSheetReviewer {
 
                 val multiFrameDetected = parsedIsSheet || (recCols * recRows > 1)
                 val addedAsSinglePicture = multiFrameDetected && (userRequestedColumns == 1 && userRequestedRows == 1)
+                val sourceBadge = if (omniResponse.providerUsed == AiProviderType.FIREBASE_STUDIO) {
+                    "GEMINI 3.8 FLASH VISION + GRID SCAN"
+                } else {
+                    "${omniResponse.providerUsed.name} VISION + GRID SCAN"
+                }
 
                 return@withContext AiSpriteSheetReviewResult(
                     fileName = fileName,
@@ -159,7 +176,7 @@ object AiImportSpriteSheetReviewer {
                     verdictTitle = parsedTitle,
                     aiReviewSummary = parsedSummary,
                     technicalGridEvidence = "$parsedEvidence | Local Scan: ${localResult.recommendedColumns}×${localResult.recommendedRows}",
-                    reviewSource = "GEMINI 3.8 FLASH VISION + GRID SCAN"
+                    reviewSource = sourceBadge
                 )
             }
         } catch (ce: CancellationException) {

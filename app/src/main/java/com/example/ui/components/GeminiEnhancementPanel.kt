@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BookmarkAdded
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.PlayArrow
@@ -40,6 +41,10 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -82,6 +87,10 @@ fun GeminiEnhancementPanel(
     modifier: Modifier = Modifier
 ) {
     val activeInputBitmap: Bitmap? = viewModel.resolveSelectedGeminiInputBitmap(uiState)
+    var showOmniAiHubSheet by remember { mutableStateOf(false) }
+    val enabledSourceCount = uiState.knowledgeSources.count { it.enabled }
+    val activeTextLabel = shortProviderName(uiState.omniAiRouting.activeTextProvider)
+    val activeImageLabel = shortProviderName(uiState.omniAiRouting.activeImageProvider)
 
     Card(
         shape = RoundedCornerShape(16.dp),
@@ -135,9 +144,9 @@ fun GeminiEnhancementPanel(
                 ) {
                     Text(
                         text = if (uiState.geminiOperationMode == GeminiOperationMode.AI_IMAGE_SYNTHESIS) {
-                            "NANO-BANANA-2.1"
+                            activeImageLabel.uppercase()
                         } else {
-                            "GEMINI-3.8-FLASH"
+                            activeTextLabel.uppercase()
                         },
                         fontFamily = TechMono,
                         fontSize = 8.sp,
@@ -146,6 +155,31 @@ fun GeminiEnhancementPanel(
                         modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
                     )
                 }
+            }
+
+            // Multi-AI & Multi-Source Hub Launcher Pill
+            OutlinedButton(
+                onClick = { showOmniAiHubSheet = true },
+                border = androidx.compose.foundation.BorderStroke(1.2.dp, CyanNeon.copy(alpha = 0.75f)),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = Color(0xFF0E1B30),
+                    contentColor = CyanNeon
+                ),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .testTag("open_omni_ai_hub_btn")
+            ) {
+                Icon(Icons.Default.Hub, contentDescription = "Open Multi-AI Hub", modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "AI Hub • Text: $activeTextLabel • Img: $activeImageLabel • $enabledSourceCount Src",
+                    fontFamily = TechMono,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1
+                )
             }
 
             // Step 1: Select Operation Mode
@@ -641,6 +675,14 @@ fun GeminiEnhancementPanel(
                 }
             }
         }
+    }
+
+    if (showOmniAiHubSheet) {
+        OmniAiConnectionsSheet(
+            uiState = uiState,
+            viewModel = viewModel,
+            onDismiss = { showOmniAiHubSheet = false }
+        )
     }
 }
 

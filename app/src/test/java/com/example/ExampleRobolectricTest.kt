@@ -1020,4 +1020,273 @@ class ExampleRobolectricTest {
       vm.uiState.value.geminiCustomInstruction
     )
   }
+
+  @Test
+  fun `test openrouter pkce s256 challenge generation and loopback auth url formatting`() {
+    // 1. Random code verifier meets RFC 7636 bounds (43..128 URL-safe chars, no padding)
+    val verifier = com.example.ai.OpenRouterPkceHelper.generateCodeVerifier()
+    assertTrue(verifier.length in 43..128)
+    assertTrue(verifier.all { it.isLetterOrDigit() || it == '-' || it == '_' })
+    assertEquals(false, verifier.contains('='))
+
+    // 2. Deterministic RFC 7636 Appendix B S256 test vector
+    val rfcVerifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    val rfcExpectedChallenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+    val computed = com.example.ai.OpenRouterPkceHelper.computeS256CodeChallenge(rfcVerifier)
+    assertEquals(rfcExpectedChallenge, computed)
+    assertEquals(false, computed.contains('='))
+    assertEquals(false, computed.contains('+'))
+    assertEquals(false, computed.contains('/'))
+
+    // 3. Exact loopback auth URL formatting
+    val authUrl = com.example.ai.OpenRouterPkceHelper.buildAuthUrl(43123, computed)
+    assertEquals(
+      "https://openrouter.ai/auth?callback_url=http://127.0.0.1:43123/callback&code_challenge=$rfcExpectedChallenge&code_challenge_method=S256",
+      authUrl
+    )
+
+    // 4. Loopback HTTP callback request line extraction
+    val extracted = com.example.ai.OpenRouterPkceHelper.extractCodeFromRequestLine(
+      "GET /callback?code=or_pkce_code_98765&state=ok HTTP/1.1"
+    )
+    assertEquals("or_pkce_code_98765", extracted)
+    assertEquals(
+      null,
+      com.example.ai.OpenRouterPkceHelper.extractCodeFromRequestLine("GET /favicon.ico HTTP/1.1")
+    )
+  }
+
+  @Test
+  fun `test secure ai key vault save read hint masking and clear behavior`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val vault = com.example.ai.SecureAiKeyVault(context)
+    vault.clearAll()
+
+    assertEquals(false, vault.hasCredential(com.example.ai.AiProviderType.OPENROUTER))
+    assertEquals(null, vault.getCredential(com.example.ai.AiProviderType.OPENROUTER))
+
+    val secretKey = "sk-or-v1-supersecret9876543210abcd"
+    vault.saveCredential(com.example.ai.AiProviderType.OPENROUTER, secretKey, hintPrefix = "OAuth PKCE")
+    assertTrue(vault.hasCredential(com.example.ai.AiProviderType.OPENROUTER))
+    assertEquals(secretKey, vault.getCredential(com.example.ai.AiProviderType.OPENROUTER))
+
+    // Display hint must mask secret and never expose raw key
+    val hint = vault.getAccountHint(com.example.ai.AiProviderType.OPENROUTER)
+    assertTrue(hint.contains("abcd"))
+    assertEquals(false, hint.contains("supersecret"))
+
+    // Multiple providers stored independently
+    vault.saveCredential(com.example.ai.AiProviderType.ANTHROPIC_CLAUDE, "sk-ant-api03-testkey9999")
+    assertTrue(vault.hasCredential(com.example.ai.AiProviderType.ANTHROPIC_CLAUDE))
+    assertEquals("sk-ant-api03-testkey9999", vault.getCredential(com.example.ai.AiProviderType.ANTHROPIC_CLAUDE))
+
+    // Clearing one provider does not clear another
+    vault.clearCredential(com.example.ai.AiProviderType.OPENROUTER)
+    assertEquals(false, vault.hasCredential(com.example.ai.AiProviderType.OPENROUTER))
+    assertEquals(null, vault.getCredential(com.example.ai.AiProviderType.OPENROUTER))
+    assertTrue(vault.hasCredential(com.example.ai.AiProviderType.ANTHROPIC_CLAUDE))
+
+    // Blank secret clears existing credential
+    vault.saveCredential(com.example.ai.AiProviderType.ANTHROPIC_CLAUDE, "   ")
+    assertEquals(false, vault.hasCredential(com.example.ai.AiProviderType.ANTHROPIC_CLAUDE))
+  }
+
+  @Test
+  fun `test multi source context registry toggling ssrf protection and max chars budget`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    java.io.File(context.filesDir, com.example.ai.MultiSourceContextRegistry.SOURCES_FILE_NAME).delete()
+    val registry = com.example.ai.MultiSourceContextRegistry(context)
+
+    // 1. Add multiple knowledge sources
+    registry.addPastedNoteSource(
+      title = "Cyber Knight World Bible",
+      content = "Armor uses clearcoat cobalt visors with warm tungsten rim lighting.",
+      kind = com.example.ai.KnowledgeSourceKind.NOTEBOOK_MARKDOWN
+    )
+    registry.addPastedNoteSource(
+      title = "Palette Constraints",
+      content = "Limit sprite shading ramps to 4 crisp steps per hue for 32-bit readability.",
+      kind = com.example.ai.KnowledgeSourceKind.PASTED_NOTES
+    )
+
+    val allSources = registry.getSources()
+    assertEquals(3, allSources.size) // Active Project + 2 added notes
+    val paletteEntry = allSources.first { it.title == "Palette Constraints" }
+
+    // 2. Assemble with all enabled
+    val combined = registry.assembleContextBlock(
+      queryHint = "cobalt visor armor",
+      activeProjectSummary = "Active Asset: Mecha Hero 3D Mesh + 4x4 Sprite Sheet",
+      maxChars = 10_000
+    )
+    assertTrue(combined.contains("### [Active PixelForge Project Context]"))
+    assertTrue(combined.contains("Active Asset: Mecha Hero 3D Mesh + 4x4 Sprite Sheet"))
+    assertTrue(combined.contains("### [Cyber Knight World Bible]"))
+    assertTrue(combined.contains("### [Palette Constraints]"))
+
+    // 3. Toggle one source OFF and verify exclusion
+    registry.toggleSource(paletteEntry.id, enabled = false)
+    val toggledBlock = registry.assembleContextBlock(
+      queryHint = "cobalt visor",
+      activeProjectSummary = "Active Asset: Mecha Hero",
+      maxChars = 10_000
+    )
+    assertTrue(toggledBlock.contains("### [Cyber Knight World Bible]"))
+    assertEquals(false, toggledBlock.contains("### [Palette Constraints]"))
+
+    // 4. Verify strict maxChars budget trimming with huge source
+    registry.addPastedNoteSource(
+      title = "Huge Lore Compendium",
+      content = "PIXELFORGE_LORE_ENTRY_".repeat(500),
+      kind = com.example.ai.KnowledgeSourceKind.LOCAL_FILE
+    )
+    val trimmed = registry.assembleContextBlock(
+      queryHint = "lore",
+      activeProjectSummary = "Compact summary",
+      maxChars = 320
+    )
+    assertTrue(trimmed.length <= 320)
+    assertTrue(trimmed.contains("### ["))
+
+    // 5. Verify SSRF protection blocks non-HTTPS, localhost, RFC1918 private, and link-local metadata IPs
+    val blockedUrls = listOf(
+      "http://raw.githubusercontent.com/Summer-Warrior/Asset-Holding-Software/main/README.md",
+      "https://127.0.0.1/secret.json",
+      "https://localhost:8080/internal",
+      "https://169.254.169.254/latest/meta-data/",
+      "https://10.0.0.5/private.md",
+      "https://192.168.1.10/notes.txt",
+      "https://172.16.0.12/internal.json",
+      "https://[::1]/loopback.md",
+      "https://user:pass@raw.githubusercontent.com/org/repo/main/file.md"
+    )
+    blockedUrls.forEach { url ->
+      val check = com.example.ai.MultiSourceContextRegistry.validatePublicHttpsUrl(url, resolveDns = false)
+      assertTrue("Expected SSRF check to block $url", check.isFailure)
+    }
+
+    val allowed = com.example.ai.MultiSourceContextRegistry.validatePublicHttpsUrl(
+      "https://raw.githubusercontent.com/Summer-Warrior/Asset-Holding-Software/main/README.md",
+      resolveDns = false
+    )
+    assertTrue(allowed.isSuccess)
+  }
+
+  @Test
+  fun `test omni ai router payload serialization for all five external endpoints and role routing`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    com.example.ai.OmniAiRouter.attachContext(context)
+
+    val fakeImageB64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"
+    val prompt = "Enhance this cyber knight sprite into a 32-bit arcade comic-cel fusion."
+    val systemPrompt = "Return strict PixelForge asset JSON."
+
+    // 1. Direct Gemini payload (text + vision JSON & image generation)
+    val directGeminiJson = com.example.ai.OmniAiRouter.buildDirectGeminiPayload(
+      prompt = prompt,
+      systemInstruction = systemPrompt,
+      imageBase64Jpeg = fakeImageB64,
+      expectJson = true,
+      requestImageOutput = false
+    )
+    assertEquals(
+      "application/json",
+      directGeminiJson.getJSONObject("generationConfig").getString("responseMimeType")
+    )
+    val geminiParts = directGeminiJson.getJSONArray("contents").getJSONObject(0).getJSONArray("parts")
+    assertEquals("image/jpeg", geminiParts.getJSONObject(0).getJSONObject("inlineData").getString("mimeType"))
+    assertEquals(fakeImageB64, geminiParts.getJSONObject(0).getJSONObject("inlineData").getString("data"))
+    assertEquals(prompt, geminiParts.getJSONObject(1).getString("text"))
+
+    val directGeminiImg = com.example.ai.OmniAiRouter.buildDirectGeminiPayload(
+      prompt = prompt,
+      requestImageOutput = true
+    )
+    val geminiModalities = directGeminiImg.getJSONObject("generationConfig").getJSONArray("responseModalities")
+    assertEquals("IMAGE", geminiModalities.getString(0))
+    assertEquals("TEXT", geminiModalities.getString(1))
+
+    // 2. OpenRouter payload (multimodal image_url + image generation modalities)
+    val openRouterImg = com.example.ai.OmniAiRouter.buildOpenRouterPayload(
+      modelId = "google/gemini-2.5-flash-image-preview",
+      prompt = prompt,
+      systemInstruction = systemPrompt,
+      imageBase64Jpeg = fakeImageB64,
+      requestImageOutput = true
+    )
+    assertEquals("google/gemini-2.5-flash-image-preview", openRouterImg.getString("model"))
+    val orModalities = openRouterImg.getJSONArray("modalities")
+    assertEquals("image", orModalities.getString(0))
+    assertEquals("text", orModalities.getString(1))
+    val orUserContent = openRouterImg.getJSONArray("messages").getJSONObject(1).getJSONArray("content")
+    assertEquals(
+      "data:image/jpeg;base64,$fakeImageB64",
+      orUserContent.getJSONObject(1).getJSONObject("image_url").getString("url")
+    )
+
+    // 3. Anthropic Claude payload (native base64 image block + system + max_tokens)
+    val claudePayload = com.example.ai.OmniAiRouter.buildAnthropicClaudePayload(
+      modelId = "claude-sonnet-4-20250514",
+      prompt = prompt,
+      systemInstruction = systemPrompt,
+      imageBase64Jpeg = fakeImageB64
+    )
+    assertEquals("claude-sonnet-4-20250514", claudePayload.getString("model"))
+    assertEquals(systemPrompt, claudePayload.getString("system"))
+    assertTrue(claudePayload.getInt("max_tokens") >= 1024)
+    val claudeBlocks = claudePayload.getJSONArray("messages").getJSONObject(0).getJSONArray("content")
+    assertEquals("image", claudeBlocks.getJSONObject(0).getString("type"))
+    assertEquals("base64", claudeBlocks.getJSONObject(0).getJSONObject("source").getString("type"))
+    assertEquals(fakeImageB64, claudeBlocks.getJSONObject(0).getJSONObject("source").getString("data"))
+    assertEquals("text", claudeBlocks.getJSONObject(1).getString("type"))
+
+    // 4. OpenAI text + image payloads
+    val openAiText = com.example.ai.OmniAiRouter.buildOpenAiTextPayload(
+      modelId = "gpt-4o",
+      prompt = prompt,
+      expectJson = true
+    )
+    assertEquals("gpt-4o", openAiText.getString("model"))
+    assertEquals("json_object", openAiText.getJSONObject("response_format").getString("type"))
+
+    val openAiImg = com.example.ai.OmniAiRouter.buildOpenAiImagePayload(
+      modelId = "gpt-image-1",
+      prompt = prompt
+    )
+    assertEquals("gpt-image-1", openAiImg.getString("model"))
+    assertEquals("b64_json", openAiImg.getString("response_format"))
+
+    // 5. Local OpenAI-Compatible payload
+    val localCompat = com.example.ai.OmniAiRouter.buildLocalOpenAiCompatPayload(
+      modelId = "llama3.2-vision",
+      prompt = prompt,
+      imageBase64Jpeg = fakeImageB64
+    )
+    assertEquals("llama3.2-vision", localCompat.getString("model"))
+    assertEquals(1, localCompat.getJSONArray("messages").length())
+
+    // 6. Role routing + profile never leaks raw credentials
+    com.example.ai.OmniAiRouter.saveProviderCredential(
+      com.example.ai.AiProviderType.DIRECT_GEMINI,
+      "AIzaSyTestSecretKeyNeverLeak1234"
+    )
+    val profile = com.example.ai.OmniAiRouter.getProviderProfile(com.example.ai.AiProviderType.DIRECT_GEMINI)
+    assertTrue(profile.isConnected)
+    assertEquals(false, profile.toString().contains("AIzaSyTestSecretKeyNeverLeak"))
+
+    val updatedRouting = com.example.ai.OmniAiRouter.setActiveProviderForRole(
+      com.example.ai.AiTaskRole.TEXT_AND_SPECS,
+      com.example.ai.AiProviderType.OPENROUTER
+    )
+    assertEquals(com.example.ai.AiProviderType.OPENROUTER, updatedRouting.activeTextProvider)
+    assertEquals(com.example.ai.AiProviderType.FIREBASE_STUDIO, updatedRouting.activeImageProvider)
+
+    // Restore default Firebase Studio routing cleanly
+    com.example.ai.OmniAiRouter.setActiveProviderForRole(
+      com.example.ai.AiTaskRole.TEXT_AND_SPECS,
+      com.example.ai.AiProviderType.FIREBASE_STUDIO
+    )
+    com.example.ai.OmniAiRouter.clearProviderCredential(com.example.ai.AiProviderType.DIRECT_GEMINI)
+  }
 }
+
