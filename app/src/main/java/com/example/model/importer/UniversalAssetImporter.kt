@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.net.Uri
@@ -18,6 +19,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.sin
@@ -68,6 +70,150 @@ object UniversalAssetImporter {
             bytes >= 1024L -> String.format("%.1f KB", bytes / 1024.0)
             else -> "$bytes B"
         }
+    }
+
+    /**
+     * Sweeps and deletes any leftover temporary files inside `File(context.cacheDir, "ephemeral_sources")`
+     * on app startup so no temporary reference files linger.
+     * Returns the number of deleted files.
+     */
+    fun sweepEphemeralSources(context: Context): Int {
+        return try {
+            val cacheCanonical = context.cacheDir.canonicalFile
+            val ephemeralDir = File(cacheCanonical, "ephemeral_sources").canonicalFile
+            val cachePrefix = if (cacheCanonical.path.endsWith(File.separator)) {
+                cacheCanonical.path
+            } else {
+                cacheCanonical.path + File.separator
+            }
+            if (!ephemeralDir.path.startsWith(cachePrefix) || !ephemeralDir.exists() || !ephemeralDir.isDirectory) {
+                return 0
+            }
+            var deletedCount = 0
+            fun deleteChildrenRecursively(dir: File) {
+                val children = dir.listFiles() ?: return
+                for (child in children) {
+                    val childCanonical = child.canonicalFile
+                    if (!childCanonical.path.startsWith(ephemeralDir.path + File.separator)) continue
+                    if (childCanonical.isDirectory) {
+                        deleteChildrenRecursively(childCanonical)
+                        childCanonical.delete()
+                    } else if (childCanonical.delete()) {
+                        deletedCount++
+                    }
+                }
+            }
+            deleteChildrenRecursively(ephemeralDir)
+            deletedCount
+        } catch (_: Exception) {
+            0
+        }
+    }
+
+    /**
+     * Strips solid chroma-key backgrounds (bright magenta `#FF00FF`, bright green `#00FF00`,
+     * or uniform solid opaque corners) via 4-connected border flood-fill, turning connected
+     * background pixels transparent (`Color.TRANSPARENT`) while preserving already-transparent PNGs untouched.
+     */
+    fun stripChromaKeyBackground(bitmap: Bitmap, tolerance: Int = 42): Bitmap {
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w <= 0 || h <= 0) return bitmap
+
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+
+        val cTL = pixels[0]
+        val cTR = pixels[w - 1]
+        val cBL = pixels[(h - 1) * w]
+        val cBR = pixels[(h - 1) * w + (w - 1)]
+        val corners = intArrayOf(cTL, cTR, cBL, cBR)
+
+        // Preserve already-transparent PNGs untouched
+        if (corners.any { Color.alpha(it) < 240 }) {
+            return bitmap
+        }
+        var transparentCount = 0
+        for (px in pixels) {
+            if (Color.alpha(px) < 240) {
+                transparentCount++
+                if (transparentCount * 100 >= pixels.size.coerceAtLeast(1)) {
+                    return bitmap
+                }
+            }
+        }
+
+        val tol = tolerance.coerceIn(0, 255)
+        fun isClose(c1: Int, c2: Int): Boolean {
+            return abs(Color.red(c1) - Color.red(c2)) <= tol &&
+                abs(Color.green(c1) - Color.green(c2)) <= tol &&
+                abs(Color.blue(c1) - Color.blue(c2)) <= tol
+        }
+
+        val magentaKey = Color.rgb(255, 0, 255)
+        val greenKey = Color.rgb(0, 255, 0)
+
+        val keyColor: Int? = when {
+            corners.count { isClose(it, magentaKey) } >= 2 -> magentaKey
+            corners.count { isClose(it, greenKey) } >= 2 -> greenKey
+            else -> {
+                // Check if corners share a uniform solid opaque background color (>= 3 of 4 corners match)
+                var consensus: Int? = null
+                for (candidate in corners) {
+                    if (corners.count { isClose(it, candidate) } >= 3) {
+                        consensus = candidate
+                        break
+                    }
+                }
+                consensus
+            }
+        }
+
+        if (keyColor == null) return bitmap
+
+        val visited = BooleanArray(w * h)
+        val queue = IntArray(w * h)
+        var head = 0
+        var tail = 0
+
+        fun tryEnqueue(x: Int, y: Int) {
+            val idx = y * w + x
+            if (visited[idx]) return
+            val px = pixels[idx]
+            if (Color.alpha(px) >= 240 && isClose(px, keyColor)) {
+                visited[idx] = true
+                queue[tail++] = idx
+            }
+        }
+
+        // Seed all matching border pixels
+        for (x in 0 until w) {
+            tryEnqueue(x, 0)
+            if (h > 1) tryEnqueue(x, h - 1)
+        }
+        for (y in 1 until h - 1) {
+            tryEnqueue(0, y)
+            if (w > 1) tryEnqueue(w - 1, y)
+        }
+
+        if (tail == 0) return bitmap
+
+        // 4-connected BFS flood fill
+        while (head < tail) {
+            val idx = queue[head++]
+            pixels[idx] = Color.TRANSPARENT
+            val x = idx % w
+            val y = idx / w
+            if (x > 0) tryEnqueue(x - 1, y)
+            if (x + 1 < w) tryEnqueue(x + 1, y)
+            if (y > 0) tryEnqueue(x, y - 1)
+            if (y + 1 < h) tryEnqueue(x, y + 1)
+        }
+
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        out.setHasAlpha(true)
+        out.setPixels(pixels, 0, w, 0, 0, w, h)
+        return out
     }
 
     /**
@@ -339,7 +485,8 @@ object UniversalAssetImporter {
         sourceKind: AssetImportSourceKind,
         columns: Int,
         rows: Int,
-        customName: String? = null
+        customName: String? = null,
+        stripChromaKeyBg: Boolean = true
     ): SpriteImportResult? {
         val (displayName, queriedBytes, mimeType) = queryUriInfo(context, uri)
         val effectiveName = customName?.takeIf { it.isNotBlank() }
@@ -354,7 +501,8 @@ object UniversalAssetImporter {
                 mimeType = mimeType,
                 sourceKind = sourceKind,
                 columns = columns,
-                rows = rows
+                rows = rows,
+                stripChromaKeyBg = stripChromaKeyBg
             )
         }
         return null
@@ -372,7 +520,8 @@ object UniversalAssetImporter {
         mimeType: String = "",
         sourceKind: AssetImportSourceKind = AssetImportSourceKind.PHOTO,
         columns: Int = 4,
-        rows: Int = 2
+        rows: Int = 2,
+        stripChromaKeyBg: Boolean = true
     ): SpriteImportResult? {
         val tempFile = File.createTempFile("pf_unbounded_sprite_", ".tmp")
         var totalBytes = 0L
@@ -406,8 +555,13 @@ object UniversalAssetImporter {
             }
 
             if (decoded != null) {
+                val processedBitmap = if (stripChromaKeyBg) {
+                    stripChromaKeyBackground(decoded.bitmap)
+                } else {
+                    decoded.bitmap
+                }
                 val sheet = SpriteSheetData.fromBitmap(
-                    bitmap = decoded.bitmap,
+                    bitmap = processedBitmap,
                     name = cleanTitle,
                     columns = safeCols,
                     rows = safeRows,

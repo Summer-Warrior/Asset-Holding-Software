@@ -1,5 +1,8 @@
 package com.example.ui.components
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -24,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.CollectionsBookmark
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
@@ -59,6 +63,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -210,6 +215,7 @@ fun AssetGalleriesPanel(
     viewModel: MainViewModel,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val galleries = uiState.assetGalleries
     val selectedEntry = remember(galleries, uiState.selectedGalleryId) {
         galleries.firstOrNull { it.gallery.id == uiState.selectedGalleryId } ?: galleries.firstOrNull()
@@ -540,6 +546,26 @@ fun AssetGalleriesPanel(
                         ) {
                             Text("From Library / History", fontFamily = TechMono, fontSize = 10.sp)
                         }
+                        Button(
+                            onClick = {
+                                val json = viewModel.prepareAssetIndexJsonExport(gallery.id)
+                                if (json != null) {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    clipboard.setPrimaryClip(ClipData.newPlainText("asset-index.json", json))
+                                    viewModel.postStatusMessage("Exported & copied asset-index.json for '${gallery.name}'!")
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = EmeraldGreen,
+                                contentColor = Color(0xFF031B26)
+                            ),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.testTag("export_asset_index_json_btn")
+                        ) {
+                            Icon(Icons.Default.Code, contentDescription = "Export asset-index.json", modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Export asset-index.json", fontFamily = TechMono, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
 
                     HorizontalDivider(color = CardBorder)
@@ -731,7 +757,8 @@ private fun GalleryItemCardWrapper(
     onRemove: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val decodedMesh = remember(item.id, item.objMeshData) { item.toMesh3D() }
+    val context = LocalContext.current
+    val decodedMesh = remember(item.id, item.objMeshData, item.meshFilePath) { item.toMesh3D(context) }
     val decodedSprite = remember(item.id, item.spritePngBytes) { item.toSpriteSheetData() }
     val previewBmp = decodedSprite?.frames?.firstOrNull() ?: decodedSprite?.sourceBitmap
     val extraTags = buildList {

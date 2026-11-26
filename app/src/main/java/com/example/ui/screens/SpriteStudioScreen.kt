@@ -48,6 +48,8 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -715,6 +717,41 @@ fun SpriteStudioScreen(
                             )
                         )
                     }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF070B12))
+                            .border(1.dp, CardBorder, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Strip Solid / Magenta BG",
+                                fontFamily = TechMono,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            Text(
+                                text = "Flood-fills opaque magenta/green/solid corners to transparent (preserves transparent PNGs)",
+                                fontSize = 9.sp,
+                                color = Color(0xFF94A3B8)
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Switch(
+                            checked = uiState.stripSolidBgOnImport,
+                            onCheckedChange = { viewModel.setStripSolidBgOnImport(it) },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color(0xFF031B26),
+                                checkedTrackColor = CyanNeon
+                            ),
+                            modifier = Modifier.testTag("strip_chroma_bg_switch")
+                        )
+                    }
                 }
             },
             confirmButton = {
@@ -724,6 +761,7 @@ fun SpriteStudioScreen(
                         val sourceKind = pendingSourceKind
                         val cols = importCols.toIntOrNull()?.coerceAtLeast(1) ?: 4
                         val rows = importRows.toIntOrNull()?.coerceAtLeast(1) ?: 2
+                        val stripBg = uiState.stripSolidBgOnImport
                         pendingImportUri = null
                         if (targetUri != null) {
                             scope.launch(Dispatchers.IO) {
@@ -732,7 +770,8 @@ fun SpriteStudioScreen(
                                     uri = targetUri,
                                     sourceKind = sourceKind,
                                     columns = cols,
-                                    rows = rows
+                                    rows = rows,
+                                    stripChromaKeyBg = stripBg
                                 )
                                 if (result != null) {
                                     viewModel.importSpriteSheetFromResult(result)

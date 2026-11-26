@@ -53,6 +53,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.AppUiState
 import com.example.MainViewModel
+import com.example.ai.ArtTheme
+import com.example.ai.GeminiAssetForge
 import com.example.ai.GeminiAssetVariant
 import com.example.ai.GeminiForgeUiState
 import com.example.ai.GeminiInputImageSource
@@ -334,13 +336,33 @@ fun GeminiEnhancementPanel(
                 )
             )
 
-            // Quick Preset Instructions
+            // Quick Preset Instructions & Style Presets
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
+                val isArcadeComicCelSelected = uiState.selectedTheme == ArtTheme.ARCADE_COMIC_CEL
+                FilterChip(
+                    selected = isArcadeComicCelSelected,
+                    onClick = { viewModel.selectArcadeComicCelStylePreset() },
+                    label = {
+                        Text(
+                            text = GeminiAssetForge.ARCADE_COMIC_CEL_STYLE_PRESET_TITLE,
+                            fontFamily = TechMono,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = AmberGold,
+                        selectedLabelColor = Color(0xFF031B26),
+                        containerColor = Color(0xFF271F0E),
+                        labelColor = AmberGold
+                    ),
+                    modifier = Modifier.testTag("gemini_preset_arcade_comic_cel")
+                )
                 val presets = listOf(
                     "Boost cyber-armor silhouette + 4 elemental variants",
                     "Create Boss Form, Stealth Ops & 16-Bit Retro variants",

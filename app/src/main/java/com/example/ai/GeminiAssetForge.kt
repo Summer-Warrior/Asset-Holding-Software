@@ -37,11 +37,18 @@ enum class AssetTarget {
     SPRITE_SHEET
 }
 
-enum class ArtTheme(val displayName: String) {
+enum class ArtTheme(
+    val displayName: String,
+    val styleDirective: String = ""
+) {
     CYBERPUNK("Cyberpunk Sci-Fi"),
     FANTASY_RPG("Fantasy RPG"),
     RETRO_VOXEL("Retro Voxel"),
-    LOW_POLY("Stylized Low-Poly")
+    LOW_POLY("Stylized Low-Poly"),
+    ARCADE_COMIC_CEL(
+        displayName = "32-Bit Arcade Comic-Cel Fusion",
+        styleDirective = GeminiAssetForge.ARCADE_COMIC_CEL_STYLE_BLOCK
+    )
 }
 
 enum class GeminiInputImageSource(val label: String, val badge: String) {
@@ -117,6 +124,10 @@ data class GenerationResult(
 )
 
 object GeminiAssetForge {
+
+    const val ARCADE_COMIC_CEL_STYLE_PRESET_TITLE: String = "32-Bit Arcade Comic-Cel Fusion"
+    const val ARCADE_COMIC_CEL_STYLE_BLOCK: String =
+        "32-bit arcade & 2D comic-cel style: punchy high-contrast ramps, crisp edges, clearcoat armor/visors w/ glints vs matte skin/fabric, bold inked silhouettes & vibrant 32-bit cel shading."
 
     /**
      * Structured JSON Schema for `gemini-3.8-flash` asset enhancement and multi-variant generation.
@@ -232,6 +243,9 @@ object GeminiAssetForge {
                 appendLine("Design 4 distinct, playable game asset variants (such as Overclocked Boss Form, Elemental Infusion, Stealth Spec-Ops, and Retro Silicon-Adapted) with distinct 3D geometry modifiers, structural attachments, and high-contrast hex palettes.")
             }
             appendLine("Art Theme: ${theme.displayName}")
+            if (theme.styleDirective.isNotBlank()) {
+                appendLine("Mandatory Visual Style Directive: ${theme.styleDirective}")
+            }
             appendLine("Target Console Silicon Profile: $hardwareName")
             appendLine("Current Active 3D Mesh: '${baseMesh.name}' (${baseMesh.vertexCount} vertices, ${baseMesh.faceCount} faces, format: ${baseMesh.sourceFormat})")
             appendLine("Current Active 2D Spritesheet: '${baseSpriteSheet.name}' (${baseSpriteSheet.columns}x${baseSpriteSheet.rows} grid, ${baseSpriteSheet.frames.size} frames)")
@@ -293,6 +307,9 @@ object GeminiAssetForge {
         val imagePrompt = buildString {
             append("Create a crisp, high-contrast video game character or vehicle asset sprite/concept illustration ")
             append("in ${theme.displayName} style, optimized for $hardwareName aesthetics, centered on a clean dark background. ")
+            if (theme.styleDirective.isNotBlank()) {
+                append("${theme.styleDirective} ")
+            }
             if (explicitCharacterTag.isNotBlank()) {
                 append("Character/Entity: $explicitCharacterTag. ")
             }
@@ -899,6 +916,7 @@ object GeminiAssetForge {
                         ArtTheme.FANTASY_RPG -> ProceduralMeshes.createTreasureChest()
                         ArtTheme.RETRO_VOXEL -> ProceduralMeshes.createCrystalArtifact()
                         ArtTheme.LOW_POLY -> ProceduralMeshes.createSciFiStarfighter()
+                        ArtTheme.ARCADE_COMIC_CEL -> ProceduralMeshes.createCyberMech()
                     }
                 }
             }
@@ -919,6 +937,7 @@ object GeminiAssetForge {
             ArtTheme.FANTASY_RPG -> Color.rgb(245, 158, 11)
             ArtTheme.RETRO_VOXEL -> Color.rgb(16, 185, 129)
             ArtTheme.LOW_POLY -> Color.rgb(255, 42, 133)
+            ArtTheme.ARCADE_COMIC_CEL -> Color.rgb(255, 56, 100)
         }
         val secondaryColor = Color.rgb(30, 41, 59)
         val highlightColor = Color.rgb(255, 255, 255)

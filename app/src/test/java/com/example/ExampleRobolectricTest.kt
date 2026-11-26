@@ -725,4 +725,299 @@ class ExampleRobolectricTest {
     assertTrue(exportText!!.contains("Mecha Armada Exhibition"))
     assertTrue(exportText.contains("Curated Items: 2"))
   }
+
+  @Test
+  fun `test room migration 2 to 3 and large obj mesh disk offloading`() = kotlinx.coroutines.runBlocking {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val meshesDir = com.example.data.local.MeshDiskStorage.getMeshesDir(context)
+
+    // 1. Canonical path validation rejects traversal outside meshesDir
+    val validFile = java.io.File(meshesDir, "42.obj")
+    val traversalFile = java.io.File(meshesDir, "../escape.obj")
+    assertTrue(com.example.data.local.MeshDiskStorage.isCanonicalMeshPathValid(meshesDir, validFile))
+    assertEquals(false, com.example.data.local.MeshDiskStorage.isCanonicalMeshPathValid(meshesDir, traversalFile))
+
+    // 2. Verify MIGRATION_2_3 upgrades a v2 SQLite schema cleanly without dropping existing user data
+    val migratedDbName = "pixelforge_migration_test_${System.currentTimeMillis()}.db"
+    val sqliteDb = android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(
+      context.getDatabasePath(migratedDbName),
+      null
+    )
+    sqliteDb.execSQL(
+      """
+      CREATE TABLE IF NOT EXISTS `asset_history` (
+        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+        `title` TEXT NOT NULL,
+        `characterTag` TEXT NOT NULL,
+        `assetType` TEXT NOT NULL,
+        `sourceOrigin` TEXT NOT NULL,
+        `hardwareTarget` TEXT NOT NULL,
+        `metricsSummary` TEXT NOT NULL,
+        `objMeshData` TEXT,
+        `spritePngBytes` BLOB,
+        `spriteColumns` INTEGER NOT NULL,
+        `spriteRows` INTEGER NOT NULL,
+        `paletteHexCsv` TEXT NOT NULL,
+        `aiReviewNotes` TEXT,
+        `createdAtMillis` INTEGER NOT NULL
+      )
+      """.trimIndent()
+    )
+    sqliteDb.execSQL(
+      """
+      CREATE TABLE IF NOT EXISTS `asset_galleries` (
+        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+        `name` TEXT NOT NULL,
+        `description` TEXT NOT NULL,
+        `themeTag` TEXT NOT NULL,
+        `accentColorHex` TEXT NOT NULL,
+        `layoutStyle` TEXT NOT NULL,
+        `createdAtMillis` INTEGER NOT NULL
+      )
+      """.trimIndent()
+    )
+    sqliteDb.execSQL(
+      """
+      CREATE TABLE IF NOT EXISTS `asset_gallery_items` (
+        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+        `galleryId` INTEGER NOT NULL,
+        `title` TEXT NOT NULL,
+        `characterTag` TEXT NOT NULL,
+        `assetType` TEXT NOT NULL,
+        `sourceOrigin` TEXT NOT NULL,
+        `hardwareTarget` TEXT NOT NULL,
+        `metricsSummary` TEXT NOT NULL,
+        `curatorNote` TEXT NOT NULL,
+        `objMeshData` TEXT,
+        `spritePngBytes` BLOB,
+        `spriteColumns` INTEGER NOT NULL,
+        `spriteRows` INTEGER NOT NULL,
+        `addedAtMillis` INTEGER NOT NULL,
+        FOREIGN KEY(`galleryId`) REFERENCES `asset_galleries`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+      )
+      """.trimIndent()
+    )
+    sqliteDb.execSQL("CREATE INDEX IF NOT EXISTS `index_asset_gallery_items_galleryId` ON `asset_gallery_items` (`galleryId`)")
+    sqliteDb.execSQL(
+      "INSERT INTO asset_galleries (id, name, description, themeTag, accentColorHex, layoutStyle, createdAtMillis) VALUES (1, 'Legacy v2 Gallery', 'Must survive migration', 'CYBERPUNK', '#00E5FF', 'GRID_2COL', 1000)"
+    )
+    sqliteDb.execSQL("PRAGMA user_version = 2")
+    sqliteDb.close()
+
+    val migratedRoomDb = androidx.room.Room.databaseBuilder(
+      context,
+      com.example.data.local.PixelForgeDatabase::class.java,
+      migratedDbName
+    )
+      .addMigrations(com.example.data.local.PixelForgeDatabase.MIGRATION_2_3)
+      .allowMainThreadQueries()
+      .build()
+    try {
+      val migratedRepo = com.example.data.local.AssetGalleryRepository(migratedRoomDb.assetGalleryDao(), context)
+      val preservedGalleries = migratedRepo.getAllGalleriesWithItemsSnapshot()
+      assertEquals(1, preservedGalleries.size)
+      assertEquals("Legacy v2 Gallery", preservedGalleries.first().gallery.name)
+    } finally {
+      migratedRoomDb.close()
+      context.deleteDatabase(migratedDbName)
+    }
+
+    // 3. Build a large >256 KB .OBJ mesh and test offloading, reading, and deletion in History & Gallery repos
+    val largeObjBuilder = StringBuilder(340 * 1024)
+    largeObjBuilder.append("# Large Test Mesh\n")
+    for (i in 0 until 14000) {
+      largeObjBuilder.append("v ${i % 50}.125 ${(i / 50) % 50}.250 ${(i % 7)}.500\n")
+    }
+    largeObjBuilder.append("f 1 2 3\nf 2 3 4\n")
+    val largeObjText = largeObjBuilder.toString()
+    assertTrue(com.example.data.local.MeshDiskStorage.exceedsInlineThreshold(largeObjText))
+
+    val db = com.example.data.local.PixelForgeDatabase.createInMemoryDatabase(context)
+    val historyRepo = com.example.data.local.AssetHistoryRepository(db.assetHistoryDao(), context)
+    val galleryRepo = com.example.data.local.AssetGalleryRepository(db.assetGalleryDao(), context)
+
+    // 3a. History offloading
+    val histId = historyRepo.recordGeneratedAsset(
+      com.example.data.local.AssetHistoryEntity(
+        title = "Mega Sculpt 300KB",
+        characterTag = "Titan",
+        assetType = "MODEL_3D",
+        sourceOrigin = "FILE IMPORT",
+        hardwareTarget = "PS2",
+        metricsSummary = "14000v/2f",
+        objMeshData = largeObjText
+      )
+    )
+    val storedHist = historyRepo.getAllHistorySnapshot().first { it.id == histId }
+    assertEquals("", storedHist.objMeshData)
+    assertTrue(storedHist.meshFilePath.endsWith("${histId}.obj"))
+    val histDiskFile = java.io.File(storedHist.meshFilePath)
+    assertTrue(histDiskFile.exists())
+
+    val restoredHistMesh = storedHist.toMesh3D(context)
+    assertNotNull(restoredHistMesh)
+    assertEquals(14000, restoredHistMesh!!.vertexCount)
+
+    historyRepo.deleteHistoryAsset(histId)
+    assertEquals(false, histDiskFile.exists())
+
+    // 3b. Gallery offloading + cascade file cleanup
+    val gId = galleryRepo.createGallery(
+      com.example.data.local.AssetGalleryEntity(
+        name = "High-Poly Vault",
+        description = "Offloaded large meshes",
+        themeTag = "SHOWCASE"
+      )
+    )
+    val gItemId = galleryRepo.addItemToGallery(
+      com.example.data.local.AssetGalleryItemEntity(
+        galleryId = gId,
+        title = "High-Poly Titan",
+        characterTag = "Titan",
+        assetType = "MODEL_3D",
+        sourceOrigin = "FILE IMPORT",
+        hardwareTarget = "PS2",
+        metricsSummary = "14000v/2f",
+        objMeshData = largeObjText
+      )
+    )
+    val storedGalleryItem = galleryRepo.getAllGalleriesWithItemsSnapshot()
+      .first { it.gallery.id == gId }
+      .items.first { it.id == gItemId }
+    assertEquals("", storedGalleryItem.objMeshData)
+    assertTrue(storedGalleryItem.meshFilePath.isNotBlank())
+    val galleryDiskFile = java.io.File(storedGalleryItem.meshFilePath)
+    assertTrue(galleryDiskFile.exists())
+
+    val restoredGalleryMesh = storedGalleryItem.toMesh3D(context)
+    assertNotNull(restoredGalleryMesh)
+    assertEquals(14000, restoredGalleryMesh!!.vertexCount)
+
+    galleryRepo.deleteGallery(gId)
+    assertEquals(false, galleryDiskFile.exists())
+    db.close()
+  }
+
+  @Test
+  fun `test chroma key background stripper for magenta green solid and transparent pngs`() {
+    // 1. Solid bright magenta (#FF00FF) border with cyan center sprite
+    val magentaBmp = android.graphics.Bitmap.createBitmap(16, 16, android.graphics.Bitmap.Config.ARGB_8888)
+    magentaBmp.eraseColor(android.graphics.Color.MAGENTA)
+    for (y in 4..11) {
+      for (x in 4..11) {
+        magentaBmp.setPixel(x, y, android.graphics.Color.CYAN)
+      }
+    }
+    val strippedMagenta = com.example.model.importer.UniversalAssetImporter.stripChromaKeyBackground(magentaBmp)
+    assertEquals(android.graphics.Color.TRANSPARENT, strippedMagenta.getPixel(0, 0))
+    assertEquals(android.graphics.Color.TRANSPARENT, strippedMagenta.getPixel(15, 15))
+    assertEquals(android.graphics.Color.CYAN, strippedMagenta.getPixel(8, 8))
+
+    // 2. Solid bright green (#00FF00) border
+    val greenBmp = android.graphics.Bitmap.createBitmap(16, 16, android.graphics.Bitmap.Config.ARGB_8888)
+    greenBmp.eraseColor(android.graphics.Color.GREEN)
+    greenBmp.setPixel(8, 8, android.graphics.Color.RED)
+    val strippedGreen = com.example.model.importer.UniversalAssetImporter.stripChromaKeyBackground(greenBmp)
+    assertEquals(android.graphics.Color.TRANSPARENT, strippedGreen.getPixel(0, 0))
+    assertEquals(android.graphics.Color.RED, strippedGreen.getPixel(8, 8))
+
+    // 3. Uniform solid opaque background corners (e.g. dark slate)
+    val solidColor = android.graphics.Color.rgb(24, 32, 48)
+    val solidBmp = android.graphics.Bitmap.createBitmap(16, 16, android.graphics.Bitmap.Config.ARGB_8888)
+    solidBmp.eraseColor(solidColor)
+    solidBmp.setPixel(8, 8, android.graphics.Color.YELLOW)
+    val strippedSolid = com.example.model.importer.UniversalAssetImporter.stripChromaKeyBackground(solidBmp)
+    assertEquals(android.graphics.Color.TRANSPARENT, strippedSolid.getPixel(0, 0))
+    assertEquals(android.graphics.Color.YELLOW, strippedSolid.getPixel(8, 8))
+
+    // 4. Already-transparent PNG must remain untouched
+    val transparentBmp = android.graphics.Bitmap.createBitmap(16, 16, android.graphics.Bitmap.Config.ARGB_8888)
+    transparentBmp.eraseColor(android.graphics.Color.TRANSPARENT)
+    transparentBmp.setPixel(8, 8, android.graphics.Color.MAGENTA)
+    val preserved = com.example.model.importer.UniversalAssetImporter.stripChromaKeyBackground(transparentBmp)
+    assertEquals(android.graphics.Color.TRANSPARENT, preserved.getPixel(0, 0))
+    assertEquals(android.graphics.Color.MAGENTA, preserved.getPixel(8, 8))
+
+    // 5. Verify importSpriteSheetFromStream honors stripChromaKeyBg toggle
+    val out = java.io.ByteArrayOutputStream()
+    magentaBmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
+    val pngBytes = out.toByteArray()
+
+    val importedStripped = com.example.model.importer.UniversalAssetImporter.importSpriteSheetFromStream(
+      inputStream = java.io.ByteArrayInputStream(pngBytes),
+      fileName = "magenta_sprite.png",
+      sourceKind = com.example.model.importer.AssetImportSourceKind.FILE,
+      columns = 1,
+      rows = 1,
+      stripChromaKeyBg = true
+    )
+    assertNotNull(importedStripped)
+    assertEquals(android.graphics.Color.TRANSPARENT, importedStripped!!.spriteSheet.sourceBitmap.getPixel(0, 0))
+    assertEquals(android.graphics.Color.CYAN, importedStripped.spriteSheet.sourceBitmap.getPixel(8, 8))
+
+    val importedUnstripped = com.example.model.importer.UniversalAssetImporter.importSpriteSheetFromStream(
+      inputStream = java.io.ByteArrayInputStream(pngBytes),
+      fileName = "magenta_sprite.png",
+      sourceKind = com.example.model.importer.AssetImportSourceKind.FILE,
+      columns = 1,
+      rows = 1,
+      stripChromaKeyBg = false
+    )
+    assertNotNull(importedUnstripped)
+    assertEquals(android.graphics.Color.MAGENTA, importedUnstripped!!.spriteSheet.sourceBitmap.getPixel(0, 0))
+  }
+
+  @Test
+  fun `test mpv omni store asset index json export ephemeral sweep and arcade comic cel preset`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+
+    // 1. Test MPV Omni-Store asset-index.json export
+    val vm = MainViewModel()
+    val gallery = vm.uiState.value.assetGalleries.first()
+    val exportedJson = vm.prepareAssetIndexJsonExport(gallery.gallery.id)
+    assertNotNull(exportedJson)
+
+    val parsed = org.json.JSONObject(exportedJson!!)
+    assertEquals(
+      "https://raw.githubusercontent.com/Summer-Warrior/Asset-Holding-Software/main/",
+      parsed.getString("baseUrl")
+    )
+    val assets = parsed.getJSONArray("assets")
+    assertEquals(gallery.items.size, assets.length())
+    val firstEntry = assets.getJSONObject(0)
+    assertTrue(firstEntry.getString("key").isNotBlank())
+    assertTrue(firstEntry.getString("path").startsWith("assets/"))
+    assertEquals(exportedJson, vm.uiState.value.exportDialogText)
+
+    // 2. Test startup ephemeral_sources cache directory sweep
+    val ephemeralDir = java.io.File(context.cacheDir, "ephemeral_sources")
+    ephemeralDir.mkdirs()
+    val leftover1 = java.io.File(ephemeralDir, "temp_ref_01.png").apply { writeText("temp") }
+    val nestedDir = java.io.File(ephemeralDir, "nested").apply { mkdirs() }
+    val leftover2 = java.io.File(nestedDir, "temp_ref_02.obj").apply { writeText("v 0 0 0") }
+    assertTrue(leftover1.exists())
+    assertTrue(leftover2.exists())
+
+    val deletedCount = com.example.model.importer.UniversalAssetImporter.sweepEphemeralSources(context)
+    assertTrue(deletedCount >= 2)
+    assertEquals(false, leftover1.exists())
+    assertEquals(false, leftover2.exists())
+
+    // 3. Test 32-Bit Arcade Comic-Cel Fusion style preset in GeminiAssetForge & MainViewModel
+    assertEquals(
+      "32-Bit Arcade Comic-Cel Fusion",
+      com.example.ai.ArtTheme.ARCADE_COMIC_CEL.displayName
+    )
+    assertTrue(
+      com.example.ai.GeminiAssetForge.ARCADE_COMIC_CEL_STYLE_BLOCK.contains(
+        "32-bit arcade & 2D comic-cel style: punchy high-contrast ramps, crisp edges, clearcoat armor/visors w/ glints vs matte skin/fabric"
+      )
+    )
+    vm.selectArcadeComicCelStylePreset()
+    assertEquals(com.example.ai.ArtTheme.ARCADE_COMIC_CEL, vm.uiState.value.selectedTheme)
+    assertEquals(
+      com.example.ai.GeminiAssetForge.ARCADE_COMIC_CEL_STYLE_BLOCK,
+      vm.uiState.value.geminiCustomInstruction
+    )
+  }
 }

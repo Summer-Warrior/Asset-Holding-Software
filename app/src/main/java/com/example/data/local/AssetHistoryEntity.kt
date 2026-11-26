@@ -1,5 +1,6 @@
 package com.example.data.local
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.room.Entity
@@ -26,6 +27,7 @@ data class AssetHistoryEntity(
     val hardwareTarget: String,
     val metricsSummary: String,
     val objMeshData: String? = null,
+    val meshFilePath: String = "",
     val spritePngBytes: ByteArray? = null,
     val spriteColumns: Int = 1,
     val spriteRows: Int = 1,
@@ -34,10 +36,12 @@ data class AssetHistoryEntity(
     val createdAtMillis: Long = System.currentTimeMillis()
 ) {
     /**
-     * Reconstructs the [Mesh3D] stored in this Room history record, if present.
+     * Reconstructs the [Mesh3D] stored in this Room history record (either inline or from `meshFilePath`), if present.
      */
-    fun toMesh3D(): Mesh3D? {
-        val rawObj = objMeshData?.takeIf { it.isNotBlank() } ?: return null
+    fun toMesh3D(context: Context? = null): Mesh3D? {
+        val rawObj = objMeshData?.takeIf { it.isNotBlank() }
+            ?: MeshDiskStorage.readMeshObj(meshFilePath, context)?.takeIf { it.isNotBlank() }
+            ?: return null
         return try {
             ObjParser.parse(
                 objContent = rawObj,
@@ -81,6 +85,7 @@ data class AssetHistoryEntity(
                 hardwareTarget == other.hardwareTarget &&
                 metricsSummary == other.metricsSummary &&
                 objMeshData == other.objMeshData &&
+                meshFilePath == other.meshFilePath &&
                 (spritePngBytes contentEquals other.spritePngBytes) &&
                 spriteColumns == other.spriteColumns &&
                 spriteRows == other.spriteRows &&
@@ -96,6 +101,7 @@ data class AssetHistoryEntity(
         result = 31 * result + assetType.hashCode()
         result = 31 * result + sourceOrigin.hashCode()
         result = 31 * result + (objMeshData?.hashCode() ?: 0)
+        result = 31 * result + meshFilePath.hashCode()
         result = 31 * result + (spritePngBytes?.contentHashCode() ?: 0)
         result = 31 * result + createdAtMillis.hashCode()
         return result

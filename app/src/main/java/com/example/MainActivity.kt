@@ -77,7 +77,9 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import com.example.ai.configureAppCheck
+import com.example.model.importer.UniversalAssetImporter
 import com.example.ui.components.AssetGalleriesOverlayScreen
 import com.example.ui.screens.AssetSuiteScreen
 import com.example.ui.screens.ForgeStudioScreen
@@ -89,6 +91,7 @@ import com.example.ui.theme.CardBorder
 import com.example.ui.theme.CyanNeon
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.TechMono
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -99,6 +102,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         configureAppCheck(this, intent)
         viewModel.attachDatabaseContext(applicationContext)
+        lifecycleScope.launch(Dispatchers.IO) {
+            UniversalAssetImporter.sweepEphemeralSources(applicationContext)
+        }
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
@@ -341,10 +347,10 @@ fun PixelForgeApp(viewModel: MainViewModel) {
                 Button(
                     onClick = {
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        val clip = ClipData.newPlainText("Wavefront OBJ", exportText)
+                        val clip = ClipData.newPlainText(uiState.exportDialogTitle, exportText)
                         clipboard.setPrimaryClip(clip)
                         scope.launch {
-                            snackbarHostState.showSnackbar("OBJ Mesh copied to clipboard!")
+                            snackbarHostState.showSnackbar("${uiState.exportDialogTitle} copied to clipboard!")
                         }
                         viewModel.dismissExportDialog()
                     },

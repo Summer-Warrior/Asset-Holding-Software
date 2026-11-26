@@ -50,6 +50,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -339,10 +340,13 @@ fun RoomAssetHistoryPanel(
     onClearAllHistory: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     var selectedFilter by remember { mutableStateOf("ALL") }
     val filteredEntities = remember(historyEntities, selectedFilter) {
         when (selectedFilter) {
-            "MODEL_3D" -> historyEntities.filter { it.assetType == "MODEL_3D" || it.objMeshData != null }
+            "MODEL_3D" -> historyEntities.filter {
+                it.assetType == "MODEL_3D" || !it.objMeshData.isNullOrBlank() || it.meshFilePath.isNotBlank()
+            }
             "SPRITE_2D" -> historyEntities.filter { it.assetType == "SPRITE_2D" || it.spritePngBytes != null }
             "FUSED_3D_2D" -> historyEntities.filter {
                 it.assetType == "FUSED_3D_2D" || it.sourceOrigin.contains("FUSION", ignoreCase = true)
@@ -532,8 +536,8 @@ fun RoomAssetHistoryPanel(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     filteredEntities.take(8).forEach { entity ->
-                        val reconstructedMesh = remember(entity.id, entity.objMeshData) {
-                            entity.toMesh3D()
+                        val reconstructedMesh = remember(entity.id, entity.objMeshData, entity.meshFilePath) {
+                            entity.toMesh3D(context)
                         }
                         val reconstructedSprite = remember(entity.id, entity.spritePngBytes) {
                             entity.toSpriteSheetData()

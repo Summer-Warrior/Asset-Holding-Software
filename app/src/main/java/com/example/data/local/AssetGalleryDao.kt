@@ -40,8 +40,14 @@ interface AssetGalleryDao {
     @Query("DELETE FROM asset_galleries WHERE id = :galleryId")
     suspend fun deleteGalleryById(galleryId: Long)
 
+    @Query("SELECT * FROM asset_gallery_items WHERE id = :itemId LIMIT 1")
+    suspend fun getGalleryItemById(itemId: Long): AssetGalleryItemEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertGalleryItem(item: AssetGalleryItemEntity): Long
+
+    @Query("UPDATE asset_gallery_items SET meshFilePath = :meshFilePath WHERE id = :itemId")
+    suspend fun updateItemMeshFilePath(itemId: Long, meshFilePath: String)
 
     @Query("DELETE FROM asset_gallery_items WHERE id = :itemId")
     suspend fun deleteGalleryItemById(itemId: Long)

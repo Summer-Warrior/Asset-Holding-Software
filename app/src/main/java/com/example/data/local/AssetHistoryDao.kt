@@ -53,6 +53,9 @@ interface AssetHistoryDao {
     @Query("DELETE FROM asset_history")
     suspend fun clearAllHistory()
 
+    @Query("UPDATE asset_history SET meshFilePath = :meshFilePath WHERE id = :id")
+    suspend fun updateMeshFilePath(id: Long, meshFilePath: String)
+
     @Query("SELECT COUNT(*) FROM asset_history")
     suspend fun getHistoryCount(): Int
 }

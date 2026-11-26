@@ -20,6 +20,7 @@ import com.example.data.local.AssetGalleryRepository
 import com.example.data.local.AssetGalleryWithItems
 import com.example.data.local.AssetHistoryEntity
 import com.example.data.local.AssetHistoryRepository
+import com.example.data.local.MeshDiskStorage
 import com.example.data.local.PixelForgeDatabase
 import com.example.model.concept.ConceptAnalysis
 import com.example.model.concept.ExtractedColor
@@ -58,6 +59,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
 
 data class AppUiState(
     val currentMesh: Mesh3D = ProceduralMeshes.createSciFiStarfighter(),
@@ -100,6 +103,7 @@ data class AppUiState(
     // Unbounded File & Photo Import Metadata Telemetry
     val lastModelImportMeta: ImportedAssetMetadata? = null,
     val lastSpriteImportMeta: ImportedAssetMetadata? = null,
+    val stripSolidBgOnImport: Boolean = true,
     // Gemini API Asset Enhancement & Multi-Variant Generation State
     val geminiForgeState: GeminiForgeUiState = GeminiForgeUiState.Idle,
     val geminiInputImageSource: GeminiInputImageSource = GeminiInputImageSource.IMPORTED_CONCEPT_ART,
@@ -132,6 +136,7 @@ class MainViewModel(
 
     private val _uiState = MutableStateFlow(AppUiState())
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
+    private var appContext: Context? = null
     private var historyCollectionStarted = false
     private var galleryCollectionStarted = false
 
@@ -334,9 +339,11 @@ class MainViewModel(
      * and begins collecting reactive `Flow<List<AssetHistoryEntity>>` and Asset Gallery updates.
      */
     fun attachDatabaseContext(context: Context) {
-        val db = PixelForgeDatabase.getDatabase(context.applicationContext)
-        attachHistoryRepository(AssetHistoryRepository(db.assetHistoryDao()))
-        attachGalleryRepository(AssetGalleryRepository(db.assetGalleryDao()))
+        val appCtx = context.applicationContext
+        this.appContext = appCtx
+        val db = PixelForgeDatabase.getDatabase(appCtx)
+        attachHistoryRepository(AssetHistoryRepository(db.assetHistoryDao(), appCtx))
+        attachGalleryRepository(AssetGalleryRepository(db.assetGalleryDao(), appCtx))
     }
 
     /**
@@ -498,7 +505,7 @@ class MainViewModel(
      */
     fun restoreAssetFromRoomHistory(entity: AssetHistoryEntity) {
         viewModelScope.launch(Dispatchers.Default) {
-            val restoredMesh = entity.toMesh3D()
+            val restoredMesh = entity.toMesh3D(appContext)
             val restoredSprite = entity.toSpriteSheetData()
             _uiState.update { state ->
                 state.copy(
@@ -642,6 +649,19 @@ class MainViewModel(
 
     fun setActiveCharacterTagForImports(characterTag: String) {
         _uiState.update { it.copy(activeCharacterTagForImports = characterTag) }
+    }
+
+    fun setStripSolidBgOnImport(enabled: Boolean) {
+        _uiState.update {
+            it.copy(
+                stripSolidBgOnImport = enabled,
+                statusMessage = if (enabled) {
+                    "Strip Solid / Magenta BG ENABLED for sprite & sheet imports"
+                } else {
+                    "Strip Solid / Magenta BG disabled (keeping original opaque background)"
+                }
+            )
+        }
     }
 
     /**
@@ -1712,6 +1732,16 @@ class MainViewModel(
         _uiState.update { it.copy(geminiCustomInstruction = instruction) }
     }
 
+    fun selectArcadeComicCelStylePreset() {
+        _uiState.update {
+            it.copy(
+                selectedTheme = ArtTheme.ARCADE_COMIC_CEL,
+                geminiCustomInstruction = GeminiAssetForge.ARCADE_COMIC_CEL_STYLE_BLOCK,
+                statusMessage = "Selected '${GeminiAssetForge.ARCADE_COMIC_CEL_STYLE_PRESET_TITLE}' style preset!"
+            )
+        }
+    }
+
     /**
      * Resolves the currently selected image Bitmap to send to Gemini alongside the asset description.
      */
@@ -2382,21 +2412,30 @@ class MainViewModel(
         curatorNote: String = ""
     ) {
         val galleryName = _uiState.value.assetGalleries.firstOrNull { it.gallery.id == galleryId }?.gallery?.name ?: "Gallery"
-        val item = AssetGalleryItemEntity(
-            galleryId = galleryId,
-            title = historyEntity.title,
-            characterTag = historyEntity.characterTag,
-            assetType = historyEntity.assetType,
-            sourceOrigin = historyEntity.sourceOrigin,
-            hardwareTarget = historyEntity.hardwareTarget,
-            metricsSummary = historyEntity.metricsSummary,
-            curatorNote = curatorNote.ifBlank { "Imported from Room Asset History Vault" },
-            objMeshData = historyEntity.objMeshData,
-            spritePngBytes = historyEntity.spritePngBytes,
-            spriteColumns = historyEntity.spriteColumns,
-            spriteRows = historyEntity.spriteRows
-        )
-        insertItemIntoGalleryInternal(item, galleryName)
+        viewModelScope.launch(Dispatchers.IO) {
+            val resolvedObjData = historyEntity.objMeshData?.takeIf { it.isNotBlank() }
+                ?: if (historyEntity.meshFilePath.isNotBlank()) {
+                    MeshDiskStorage.readMeshObj(historyEntity.meshFilePath, appContext)
+                } else {
+                    null
+                }
+            val item = AssetGalleryItemEntity(
+                galleryId = galleryId,
+                title = historyEntity.title,
+                characterTag = historyEntity.characterTag,
+                assetType = historyEntity.assetType,
+                sourceOrigin = historyEntity.sourceOrigin,
+                hardwareTarget = historyEntity.hardwareTarget,
+                metricsSummary = historyEntity.metricsSummary,
+                curatorNote = curatorNote.ifBlank { "Imported from Room Asset History Vault" },
+                objMeshData = resolvedObjData,
+                meshFilePath = "",
+                spritePngBytes = historyEntity.spritePngBytes,
+                spriteColumns = historyEntity.spriteColumns,
+                spriteRows = historyEntity.spriteRows
+            )
+            insertItemIntoGalleryInternal(item, galleryName)
+        }
     }
 
     private fun insertItemIntoGalleryInternal(item: AssetGalleryItemEntity, galleryName: String) {
@@ -2438,7 +2477,7 @@ class MainViewModel(
 
     fun loadGalleryItemIntoStudio(item: AssetGalleryItemEntity) {
         viewModelScope.launch(Dispatchers.Default) {
-            val restoredMesh = item.toMesh3D()
+            val restoredMesh = item.toMesh3D(appContext)
             val restoredSprite = item.toSpriteSheetData()
             _uiState.update { state ->
                 state.copy(
@@ -2509,11 +2548,79 @@ class MainViewModel(
         }
     }
 
+    fun prepareAssetIndexJsonExport(galleryId: Long): String? {
+        val entry = _uiState.value.assetGalleries.firstOrNull { it.gallery.id == galleryId } ?: return null
+        val json = buildMpvAssetIndexJson(entry)
+        _uiState.update {
+            it.copy(
+                exportDialogTitle = "Export asset-index.json (${entry.gallery.name})",
+                exportDialogText = json
+            )
+        }
+        return json
+    }
+
     fun dismissExportDialog() {
         _uiState.update { it.copy(exportDialogText = null) }
     }
 
     fun dismissStatusMessage() {
         _uiState.update { it.copy(statusMessage = null) }
+    }
+
+    companion object {
+        const val MPV_ASSET_INDEX_BASE_URL =
+            "https://raw.githubusercontent.com/Summer-Warrior/Asset-Holding-Software/main/"
+
+        private fun sanitizeAssetSlug(raw: String, fallback: String): String {
+            val slug = raw.lowercase()
+                .replace(Regex("[^a-z0-9]+"), "_")
+                .trim('_')
+            return slug.ifBlank { fallback }
+        }
+
+        /**
+         * Serializes a gallery's curated assets into MPV Omni-Store's exact `asset-index.json` schema:
+         * `{ "baseUrl": "https://raw.githubusercontent.com/Summer-Warrior/Asset-Holding-Software/main/", "assets": [ ... ] }`
+         */
+        fun buildMpvAssetIndexJson(
+            galleryEntry: AssetGalleryWithItems,
+            baseUrl: String = MPV_ASSET_INDEX_BASE_URL
+        ): String {
+            val gallerySlug = sanitizeAssetSlug(galleryEntry.gallery.name, "gallery_${galleryEntry.gallery.id}")
+            val assetsArray = JSONArray()
+            val usedKeys = mutableSetOf<String>()
+
+            galleryEntry.items.forEachIndexed { idx, item ->
+                val itemSlug = sanitizeAssetSlug(item.title, "asset_${idx + 1}")
+                val baseKey = "${gallerySlug}/${itemSlug}"
+                val uniqueKey = if (usedKeys.add(baseKey)) baseKey else "${baseKey}_${idx + 1}"
+
+                val hasSprite = item.spritePngBytes != null && item.spritePngBytes.isNotEmpty()
+                val hasMesh = !item.objMeshData.isNullOrBlank() || item.meshFilePath.isNotBlank()
+                val primaryExt = if (hasSprite || item.assetType != "MODEL_3D") "png" else "obj"
+                val primaryPath = "assets/$uniqueKey.$primaryExt"
+
+                val assetObj = JSONObject().apply {
+                    put("key", uniqueKey)
+                    put("path", primaryPath)
+                    put("title", item.title)
+                    put("assetType", item.assetType)
+                    put("characterTag", item.characterTag)
+                    put("hardwareTarget", item.hardwareTarget)
+                    put("gallery", galleryEntry.gallery.name)
+                    if (hasMesh && primaryExt != "obj") {
+                        put("meshPath", "assets/$uniqueKey.obj")
+                    }
+                }
+                assetsArray.put(assetObj)
+            }
+
+            val root = JSONObject().apply {
+                put("baseUrl", baseUrl)
+                put("assets", assetsArray)
+            }
+            return root.toString(2)
+        }
     }
 }

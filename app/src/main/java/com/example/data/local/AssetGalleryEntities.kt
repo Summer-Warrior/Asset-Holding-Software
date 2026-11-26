@@ -1,5 +1,6 @@
 package com.example.data.local
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.room.Entity
@@ -55,13 +56,16 @@ data class AssetGalleryItemEntity(
     val metricsSummary: String,
     val curatorNote: String = "",
     val objMeshData: String? = null,
+    val meshFilePath: String = "",
     val spritePngBytes: ByteArray? = null,
     val spriteColumns: Int = 1,
     val spriteRows: Int = 1,
     val addedAtMillis: Long = System.currentTimeMillis()
 ) {
-    fun toMesh3D(): Mesh3D? {
-        val rawObj = objMeshData?.takeIf { it.isNotBlank() } ?: return null
+    fun toMesh3D(context: Context? = null): Mesh3D? {
+        val rawObj = objMeshData?.takeIf { it.isNotBlank() }
+            ?: MeshDiskStorage.readMeshObj(meshFilePath, context)?.takeIf { it.isNotBlank() }
+            ?: return null
         return try {
             ObjParser.parse(
                 objContent = rawObj,
@@ -104,6 +108,7 @@ data class AssetGalleryItemEntity(
                 metricsSummary == other.metricsSummary &&
                 curatorNote == other.curatorNote &&
                 objMeshData == other.objMeshData &&
+                meshFilePath == other.meshFilePath &&
                 (spritePngBytes contentEquals other.spritePngBytes) &&
                 spriteColumns == other.spriteColumns &&
                 spriteRows == other.spriteRows &&
@@ -116,6 +121,7 @@ data class AssetGalleryItemEntity(
         result = 31 * result + title.hashCode()
         result = 31 * result + assetType.hashCode()
         result = 31 * result + (objMeshData?.hashCode() ?: 0)
+        result = 31 * result + meshFilePath.hashCode()
         result = 31 * result + (spritePngBytes?.contentHashCode() ?: 0)
         result = 31 * result + addedAtMillis.hashCode()
         return result

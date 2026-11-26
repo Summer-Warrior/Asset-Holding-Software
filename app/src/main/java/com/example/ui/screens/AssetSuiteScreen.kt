@@ -135,6 +135,7 @@ fun AssetSuiteScreen(
             val charTag = uiState.activeCharacterTagForImports.ifBlank { "Character" }
             val cols = spriteImportCols
             val rows = spriteImportRows
+            val stripBg = uiState.stripSolidBgOnImport
             scope.launch(Dispatchers.IO) {
                 val result = UniversalAssetImporter.importSpriteSheetFromUri(
                     context = context,
@@ -142,7 +143,8 @@ fun AssetSuiteScreen(
                     sourceKind = AssetImportSourceKind.PHOTO,
                     columns = cols,
                     rows = rows,
-                    customName = "$charTag Imported Sheet"
+                    customName = "$charTag Imported Sheet",
+                    stripChromaKeyBg = stripBg
                 )
                 if (result != null) {
                     viewModel.importSpriteSheetFromResult(result, characterTagOverride = charTag)
@@ -159,6 +161,7 @@ fun AssetSuiteScreen(
             val charTag = uiState.activeCharacterTagForImports.ifBlank { "Character" }
             val cols = spriteImportCols
             val rows = spriteImportRows
+            val stripBg = uiState.stripSolidBgOnImport
             scope.launch(Dispatchers.IO) {
                 val result = UniversalAssetImporter.importSpriteSheetFromUri(
                     context = context,
@@ -166,7 +169,8 @@ fun AssetSuiteScreen(
                     sourceKind = AssetImportSourceKind.FILE,
                     columns = cols,
                     rows = rows,
-                    customName = "$charTag Imported Sheet"
+                    customName = "$charTag Imported Sheet",
+                    stripChromaKeyBg = stripBg
                 )
                 if (result != null) {
                     viewModel.importSpriteSheetFromResult(result, characterTagOverride = charTag)
@@ -596,29 +600,52 @@ fun AssetSuiteScreen(
                         spriteFileLauncher.launch(arrayOf("*/*"))
                     },
                     extraControls = {
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("Grid:", fontFamily = TechMono, fontSize = 10.sp, color = Color(0xFF94A3B8))
-                            listOf(1 to 1, 4 to 1, 4 to 2, 4 to 3, 4 to 4).forEach { (c, r) ->
-                                val selected = spriteImportCols == c && spriteImportRows == r
-                                Surface(
-                                    color = if (selected) MagentaNeon else Color(0xFF1E293B),
-                                    shape = RoundedCornerShape(4.dp),
-                                    modifier = Modifier.clickable {
-                                        spriteImportCols = c
-                                        spriteImportRows = r
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Grid:", fontFamily = TechMono, fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                listOf(1 to 1, 4 to 1, 4 to 2, 4 to 3, 4 to 4).forEach { (c, r) ->
+                                    val selected = spriteImportCols == c && spriteImportRows == r
+                                    Surface(
+                                        color = if (selected) MagentaNeon else Color(0xFF1E293B),
+                                        shape = RoundedCornerShape(4.dp),
+                                        modifier = Modifier.clickable {
+                                            spriteImportCols = c
+                                            spriteImportRows = r
+                                        }
+                                    ) {
+                                        Text(
+                                            text = "${c}×${r}",
+                                            fontFamily = TechMono,
+                                            fontSize = 9.sp,
+                                            color = Color.White,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
                                     }
-                                ) {
-                                    Text(
-                                        text = "${c}×${r}",
-                                        fontFamily = TechMono,
-                                        fontSize = 9.sp,
-                                        color = Color.White,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                    )
                                 }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Strip Solid / Magenta BG",
+                                    fontFamily = TechMono,
+                                    fontSize = 10.sp,
+                                    color = CyanNeon
+                                )
+                                Switch(
+                                    checked = uiState.stripSolidBgOnImport,
+                                    onCheckedChange = { viewModel.setStripSolidBgOnImport(it) },
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = Color(0xFF031B26),
+                                        checkedTrackColor = CyanNeon
+                                    ),
+                                    modifier = Modifier.testTag("suite_strip_chroma_bg_switch")
+                                )
                             }
                         }
                     }
