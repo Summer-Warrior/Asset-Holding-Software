@@ -1,8 +1,11 @@
 package com.example
 
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -30,6 +33,7 @@ import androidx.compose.material.icons.filled.CollectionsBookmark
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeveloperBoard
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Share
@@ -170,6 +174,23 @@ fun PixelForgeApp(viewModel: MainViewModel) {
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = {
+                            try {
+                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse("nexus-master-hub://open"))
+                                context.startActivity(intent)
+                            } catch (_: ActivityNotFoundException) {
+                                viewModel.postStatusMessage("Master Hub app not installed (nexus-master-hub://open).")
+                            }
+                        },
+                        modifier = Modifier.testTag("top_bar_master_hub_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Hub,
+                            contentDescription = "Return to Master Hub",
+                            tint = Color(0xFF10B981)
+                        )
+                    }
                     IconButton(
                         onClick = { showGalleriesOverlay = !showGalleriesOverlay },
                         modifier = Modifier.testTag("top_bar_galleries_btn")

@@ -33,7 +33,9 @@ data class AssetHistoryEntity(
     val spriteRows: Int = 1,
     val paletteHexCsv: String = "",
     val aiReviewNotes: String? = null,
-    val createdAtMillis: Long = System.currentTimeMillis()
+    val createdAtMillis: Long = System.currentTimeMillis(),
+    val gameTag: String = "General Studio",
+    val groupTag: String = "Core Roster"
 ) {
     /**
      * Reconstructs the [Mesh3D] stored in this Room history record (either inline or from `meshFilePath`), if present.
@@ -80,6 +82,8 @@ data class AssetHistoryEntity(
         return id == other.id &&
                 title == other.title &&
                 characterTag == other.characterTag &&
+                gameTag == other.gameTag &&
+                groupTag == other.groupTag &&
                 assetType == other.assetType &&
                 sourceOrigin == other.sourceOrigin &&
                 hardwareTarget == other.hardwareTarget &&
@@ -98,6 +102,8 @@ data class AssetHistoryEntity(
         var result = id.hashCode()
         result = 31 * result + title.hashCode()
         result = 31 * result + characterTag.hashCode()
+        result = 31 * result + gameTag.hashCode()
+        result = 31 * result + groupTag.hashCode()
         result = 31 * result + assetType.hashCode()
         result = 31 * result + sourceOrigin.hashCode()
         result = 31 * result + (objMeshData?.hashCode() ?: 0)
@@ -122,7 +128,9 @@ data class AssetHistoryEntity(
             spriteSheet: SpriteSheetData? = null,
             paletteHexList: List<String> = emptyList(),
             aiReviewNotes: String? = null,
-            createdAtMillis: Long = System.currentTimeMillis()
+            createdAtMillis: Long = System.currentTimeMillis(),
+            gameTag: String = "General Studio",
+            groupTag: String = "Core Roster"
         ): AssetHistoryEntity {
             val serializedObj = mesh?.let {
                 try {
@@ -166,7 +174,9 @@ data class AssetHistoryEntity(
                 spriteRows = spriteSheet?.rows ?: 1,
                 paletteHexCsv = paletteHexList.joinToString(","),
                 aiReviewNotes = aiReviewNotes,
-                createdAtMillis = createdAtMillis
+                createdAtMillis = createdAtMillis,
+                gameTag = gameTag.ifBlank { "General Studio" },
+                groupTag = groupTag.ifBlank { "Core Roster" }
             )
         }
     }

@@ -1,8 +1,11 @@
 package com.example.ui.components
 
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -32,6 +35,7 @@ import androidx.compose.material.icons.filled.CollectionsBookmark
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.LibraryAdd
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.ViewCarousel
@@ -125,6 +129,7 @@ fun AssetGalleriesOverlayScreen(
 ) {
     BackHandler(onBack = onBack)
 
+    val context = LocalContext.current
     var showCreateDialog by remember { mutableStateOf(false) }
 
     Column(
@@ -167,17 +172,46 @@ fun AssetGalleriesOverlayScreen(
                     )
                 }
             }
-            Button(
-                onClick = { showCreateDialog = true },
-                colors = ButtonDefaults.buttonColors(containerColor = CyanNeon, contentColor = Color(0xFF031B26)),
-                shape = RoundedCornerShape(10.dp),
-                modifier = Modifier.testTag("overlay_create_gallery_btn")
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("New Gallery", fontFamily = TechMono, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                OutlinedButton(
+                    onClick = {
+                        try {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("nexus-master-hub://open"))
+                            context.startActivity(intent)
+                        } catch (_: ActivityNotFoundException) {
+                            viewModel.postStatusMessage("Master Hub app not installed on this device (nexus-master-hub://open).")
+                        }
+                    },
+                    border = androidx.compose.foundation.BorderStroke(1.dp, EmeraldGreen.copy(alpha = 0.7f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = EmeraldGreen),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.testTag("galleries_return_master_hub_btn")
+                ) {
+                    Icon(Icons.Default.Hub, contentDescription = "Return to Master Hub", modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Hub", fontFamily = TechMono, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
+                Button(
+                    onClick = { showCreateDialog = true },
+                    colors = ButtonDefaults.buttonColors(containerColor = CyanNeon, contentColor = Color(0xFF031B26)),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.testTag("overlay_create_gallery_btn")
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("New Gallery", fontFamily = TechMono, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
             }
         }
+
+        // 3-Level Game -> Group -> Character Drill-Down Explorer
+        GameGroupCharacterBrowserPanel(
+            uiState = uiState,
+            viewModel = viewModel
+        )
 
         AssetGalleriesPanel(
             uiState = uiState,

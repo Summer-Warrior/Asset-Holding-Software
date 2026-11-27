@@ -49,6 +49,9 @@ interface AssetGalleryDao {
     @Query("UPDATE asset_gallery_items SET meshFilePath = :meshFilePath WHERE id = :itemId")
     suspend fun updateItemMeshFilePath(itemId: Long, meshFilePath: String)
 
+    @Query("UPDATE asset_gallery_items SET gameTag = :gameTag, groupTag = :groupTag, characterTag = :characterTag WHERE id = :itemId")
+    suspend fun updateItemTags(itemId: Long, gameTag: String, groupTag: String, characterTag: String)
+
     @Query("DELETE FROM asset_gallery_items WHERE id = :itemId")
     suspend fun deleteGalleryItemById(itemId: Long)
 

@@ -94,6 +94,7 @@ import com.example.ui.components.AiFileImportReviewCard
 import com.example.ui.components.AssetGalleriesPanel
 import com.example.ui.components.AssetPreviewCard
 import com.example.ui.components.AssetPreviewInspectorCard
+import com.example.ui.components.GameGroupCharacterBrowserPanel
 import com.example.ui.components.InspectorMode
 import com.example.ui.components.ModelSpriteFusionPanel
 import com.example.ui.components.RoomAssetHistoryPanel
@@ -1540,6 +1541,12 @@ fun AssetSuiteScreen(
             },
             onRunDeepGeminiReview = { viewModel.runDeepGeminiImportFileReview() },
             onKeepAsSingleImage = { viewModel.keepImportedFileAsSingleImage() }
+        )
+
+        // 3-Level Game -> Group -> Character Explorer & Quick Presets
+        GameGroupCharacterBrowserPanel(
+            uiState = uiState,
+            viewModel = viewModel
         )
 
         // Custom Asset Galleries & Exhibitions

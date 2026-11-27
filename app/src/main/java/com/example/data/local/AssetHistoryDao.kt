@@ -32,6 +32,8 @@ interface AssetHistoryDao {
         SELECT * FROM asset_history 
         WHERE title LIKE '%' || :query || '%' 
            OR characterTag LIKE '%' || :query || '%' 
+           OR gameTag LIKE '%' || :query || '%' 
+           OR groupTag LIKE '%' || :query || '%' 
            OR sourceOrigin LIKE '%' || :query || '%'
         ORDER BY createdAtMillis DESC
         """
@@ -55,6 +57,9 @@ interface AssetHistoryDao {
 
     @Query("UPDATE asset_history SET meshFilePath = :meshFilePath WHERE id = :id")
     suspend fun updateMeshFilePath(id: Long, meshFilePath: String)
+
+    @Query("UPDATE asset_history SET gameTag = :gameTag, groupTag = :groupTag, characterTag = :characterTag WHERE id = :id")
+    suspend fun updateHistoryTags(id: Long, gameTag: String, groupTag: String, characterTag: String)
 
     @Query("SELECT COUNT(*) FROM asset_history")
     suspend fun getHistoryCount(): Int

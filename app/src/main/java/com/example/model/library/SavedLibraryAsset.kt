@@ -24,5 +24,7 @@ data class SavedLibraryAsset(
     val hardwareBadge: String = "PS1",
     val metricsSummary: String = "",
     val sourceBadge: String = "STUDIO",
-    val formatSummary: String = "Unbounded Stream"
+    val formatSummary: String = "Unbounded Stream",
+    val gameTag: String = "General Studio",
+    val groupTag: String = "Core Roster"
 )

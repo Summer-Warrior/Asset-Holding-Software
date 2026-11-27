@@ -674,6 +674,12 @@ fun GeminiEnhancementPanel(
                     }
                 }
             }
+
+            // Style-Locked True Fusion Prompt Studio + Canonical Asset & Spec Auditor
+            PromptStudioAndAuditPanel(
+                uiState = uiState,
+                viewModel = viewModel
+            )
         }
     }
 

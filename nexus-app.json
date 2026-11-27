@@ -1,0 +1,19 @@
+{
+  "repo": "Summer-Warrior/Asset-Holding-Software",
+  "displayName": "Nexus Asset Vault (PixelForge)",
+  "category": "ASSET_VAULT",
+  "linkedMasterHub": "Summer-Warrior/Project-MPV-RP-Master-Hub",
+  "installablePlatforms": [
+    "android",
+    "windows",
+    "linux",
+    "macos"
+  ],
+  "browserOnlyFallback": false,
+  "requiredDiscordLock": {
+    "mode": "DISCORD_SIGNED_IN",
+    "guildId": "",
+    "allowedRoleIds": [],
+    "allowedUserIds": []
+  }
+}

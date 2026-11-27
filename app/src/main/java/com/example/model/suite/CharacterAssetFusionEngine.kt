@@ -33,7 +33,9 @@ data class StagedCharacterAsset(
     val mesh: Mesh3D? = null,
     val spriteSheet: SpriteSheetData? = null,
     val bitmap: Bitmap? = null,
-    val loreText: String? = null
+    val loreText: String? = null,
+    val gameTag: String = "General Studio",
+    val groupTag: String = "Core Roster"
 )
 
 data class NamedCharacterFusionGroup(

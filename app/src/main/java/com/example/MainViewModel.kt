@@ -11,7 +11,10 @@ import com.example.ai.AiProviderType
 import com.example.ai.AiSpriteSheetReviewResult
 import com.example.ai.AiTaskRole
 import com.example.ai.ArtTheme
+import com.example.ai.AssetAuditReport
 import com.example.ai.AssetTarget
+import com.example.ai.CanonicalAssetAndCodeAuditor
+import com.example.ai.ContractComplianceReport
 import com.example.ai.GeminiAssetForge
 import com.example.ai.GeminiAssetVariant
 import com.example.ai.GeminiForgeReport
@@ -24,6 +27,10 @@ import com.example.ai.OmniAiRouter
 import com.example.ai.OmniAiRoutingConfig
 import com.example.ai.OpenRouterPkceHelper
 import com.example.ai.OpenRouterPkceResult
+import com.example.ai.PromptAssetPreset
+import com.example.ai.PromptHardwareTier
+import com.example.ai.PromptStudioEngine
+import com.example.ai.PromptStudioOutput
 import com.example.data.local.AssetGalleryEntity
 import com.example.data.local.AssetGalleryItemEntity
 import com.example.data.local.AssetGalleryRepository
@@ -102,8 +109,10 @@ data class AppUiState(
     val suiteBuildConfig: SuiteBuildConfig = SuiteBuildConfig(),
     val activeAssetSuite: UnifiedAssetSuite? = null,
     val savedAssetSuites: List<UnifiedAssetSuite> = emptyList(),
-    // Named-Character Automatic Asset Fusion state
+    // Named-Character & Game -> Group -> Character Hierarchy State
     val autoFuseNamedCharacters: Boolean = true,
+    val activeGameTagForImports: String = "General Studio",
+    val activeGroupTagForImports: String = "Core Roster",
     val activeCharacterTagForImports: String = "Kaelen",
     val stagedCharacterPool: List<StagedCharacterAsset> = emptyList(),
     val characterFusionGroups: List<NamedCharacterFusionGroup> = emptyList(),
@@ -142,7 +151,16 @@ data class AppUiState(
     val omniAiRouting: OmniAiRoutingConfig = OmniAiRouter.getRoutingConfig(),
     val knowledgeSources: List<KnowledgeSourceEntry> = OmniAiRouter.getContextRegistry().getSources(),
     val isSigningInOpenRouterPkce: Boolean = false,
-    val isFetchingKnowledgeUrl: Boolean = false
+    val isFetchingKnowledgeUrl: Boolean = false,
+    // Style-Locked True Fusion Prompt Studio State
+    val promptHardwareTier: PromptHardwareTier = PromptHardwareTier.ARCADE_32BIT_60FPS,
+    val promptAssetPreset: PromptAssetPreset = PromptAssetPreset.SINGLE_SPRITE_1X1,
+    val includeHumanoidHeroicProportions: Boolean = false,
+    // Canonical Asset & Official Spec Auditor State
+    val lastAssetAuditReport: AssetAuditReport? = null,
+    val isAuditingAsset: Boolean = false,
+    val auditIntendedForPublicRelease: Boolean = false,
+    val lastContractComplianceReport: ContractComplianceReport? = null
 )
 
 class MainViewModel(
@@ -451,7 +469,9 @@ class MainViewModel(
         mesh: Mesh3D? = null,
         spriteSheet: SpriteSheetData? = null,
         paletteHexList: List<String> = emptyList(),
-        aiReviewNotes: String? = null
+        aiReviewNotes: String? = null,
+        gameTag: String = _uiState.value.activeGameTagForImports,
+        groupTag: String = _uiState.value.activeGroupTagForImports
     ) {
         viewModelScope.launch(Dispatchers.Default) {
             val entity = AssetHistoryEntity.fromStudioAssets(
@@ -464,7 +484,9 @@ class MainViewModel(
                 mesh = mesh,
                 spriteSheet = spriteSheet,
                 paletteHexList = paletteHexList,
-                aiReviewNotes = aiReviewNotes
+                aiReviewNotes = aiReviewNotes,
+                gameTag = gameTag.ifBlank { "General Studio" },
+                groupTag = groupTag.ifBlank { "Core Roster" }
             )
             val repo = historyRepository
             if (repo != null) {
@@ -529,6 +551,8 @@ class MainViewModel(
                 state.copy(
                     currentMesh = restoredMesh ?: state.currentMesh,
                     currentSpriteSheet = restoredSprite ?: state.currentSpriteSheet,
+                    activeGameTagForImports = entity.gameTag.ifBlank { state.activeGameTagForImports },
+                    activeGroupTagForImports = entity.groupTag.ifBlank { state.activeGroupTagForImports },
                     activeCharacterTagForImports = entity.characterTag.ifBlank { state.activeCharacterTagForImports },
                     statusMessage = "Restored '${entity.title}' (${entity.assetType}) from Room History Vault!"
                 )
@@ -608,7 +632,9 @@ class MainViewModel(
             inspectedPitchDegrees = pitchDeg,
             inspectedSpriteRotationDegrees = spriteRotDeg,
             hardwareBadge = snapshot.selectedHardware.shortName,
-            metricsSummary = metrics
+            metricsSummary = metrics,
+            gameTag = snapshot.activeGameTagForImports.ifBlank { "General Studio" },
+            groupTag = snapshot.activeGroupTagForImports.ifBlank { "Core Roster" }
         )
         _uiState.update { state ->
             state.copy(
@@ -624,7 +650,9 @@ class MainViewModel(
             hardwareTarget = entry.hardwareBadge,
             metricsSummary = metrics,
             mesh = entry.mesh,
-            spriteSheet = entry.spriteSheet
+            spriteSheet = entry.spriteSheet,
+            gameTag = entry.gameTag,
+            groupTag = entry.groupTag
         )
     }
 
@@ -634,6 +662,8 @@ class MainViewModel(
                 currentMesh = item.mesh ?: state.currentMesh,
                 currentSpriteSheet = item.spriteSheet ?: state.currentSpriteSheet,
                 activeTexture = item.textureBitmap ?: state.activeTexture,
+                activeGameTagForImports = item.gameTag.ifBlank { state.activeGameTagForImports },
+                activeGroupTagForImports = item.groupTag.ifBlank { state.activeGroupTagForImports },
                 activeCharacterTagForImports = item.characterTag,
                 statusMessage = "Loaded '${item.title}' (${item.type.label}) from Asset Library!"
             )
@@ -667,6 +697,22 @@ class MainViewModel(
 
     fun setActiveCharacterTagForImports(characterTag: String) {
         _uiState.update { it.copy(activeCharacterTagForImports = characterTag) }
+    }
+
+    fun setActiveGameTagForImports(gameTag: String) {
+        _uiState.update {
+            it.copy(
+                activeGameTagForImports = gameTag.trim().ifBlank { "General Studio" }
+            )
+        }
+    }
+
+    fun setActiveGroupTagForImports(groupTag: String) {
+        _uiState.update {
+            it.copy(
+                activeGroupTagForImports = groupTag.trim().ifBlank { "Core Roster" }
+            )
+        }
     }
 
     fun setStripSolidBgOnImport(enabled: Boolean) {
@@ -818,6 +864,8 @@ class MainViewModel(
         )
 
         viewModelScope.launch(Dispatchers.Default) {
+            val activeGame = snapshot.activeGameTagForImports.ifBlank { "General Studio" }
+            val activeGroup = snapshot.activeGroupTagForImports.ifBlank { "Core Roster" }
             val staged = when (modality) {
                 CharacterAssetModality.MESH_3D -> StagedCharacterAsset(
                     id = "staged_mesh_${System.currentTimeMillis()}",
@@ -825,7 +873,9 @@ class MainViewModel(
                     characterName = resolvedChar,
                     modality = CharacterAssetModality.MESH_3D,
                     isUserImported = true,
-                    mesh = snapshot.currentMesh
+                    mesh = snapshot.currentMesh,
+                    gameTag = activeGame,
+                    groupTag = activeGroup
                 )
                 CharacterAssetModality.SPRITESHEET_2D -> StagedCharacterAsset(
                     id = "staged_sprite_${System.currentTimeMillis()}",
@@ -833,7 +883,9 @@ class MainViewModel(
                     characterName = resolvedChar,
                     modality = CharacterAssetModality.SPRITESHEET_2D,
                     isUserImported = true,
-                    spriteSheet = snapshot.currentSpriteSheet
+                    spriteSheet = snapshot.currentSpriteSheet,
+                    gameTag = activeGame,
+                    groupTag = activeGroup
                 )
                 CharacterAssetModality.TEXTURE_UV -> StagedCharacterAsset(
                     id = "staged_tex_${System.currentTimeMillis()}",
@@ -841,7 +893,9 @@ class MainViewModel(
                     characterName = resolvedChar,
                     modality = CharacterAssetModality.TEXTURE_UV,
                     isUserImported = true,
-                    bitmap = snapshot.activeTexture
+                    bitmap = snapshot.activeTexture,
+                    gameTag = activeGame,
+                    groupTag = activeGroup
                 )
                 CharacterAssetModality.CONCEPT_ART -> StagedCharacterAsset(
                     id = "staged_concept_${System.currentTimeMillis()}",
@@ -849,7 +903,9 @@ class MainViewModel(
                     characterName = resolvedChar,
                     modality = CharacterAssetModality.CONCEPT_ART,
                     isUserImported = true,
-                    bitmap = snapshot.conceptArtBitmap ?: snapshot.activeAssetSuite?.conceptArtBitmap
+                    bitmap = snapshot.conceptArtBitmap ?: snapshot.activeAssetSuite?.conceptArtBitmap,
+                    gameTag = activeGame,
+                    groupTag = activeGroup
                 )
                 CharacterAssetModality.LORE_SPEC -> StagedCharacterAsset(
                     id = "staged_lore_${System.currentTimeMillis()}",
@@ -857,7 +913,9 @@ class MainViewModel(
                     characterName = resolvedChar,
                     modality = CharacterAssetModality.LORE_SPEC,
                     isUserImported = true,
-                    loreText = snapshot.promptText
+                    loreText = snapshot.promptText,
+                    gameTag = activeGame,
+                    groupTag = activeGroup
                 )
             }
             registerAssetAndAutoFuseIfMatched(staged)
@@ -2409,7 +2467,9 @@ class MainViewModel(
             metricsSummary = metrics,
             curatorNote = curatorNote.ifBlank { "Curated for '$galleryName' (${snapshot.selectedHardware.shortName})" },
             mesh = meshToSave,
-            spriteSheet = spriteToSave
+            spriteSheet = spriteToSave,
+            gameTag = snapshot.activeGameTagForImports.ifBlank { "General Studio" },
+            groupTag = snapshot.activeGroupTagForImports.ifBlank { "Core Roster" }
         )
         insertItemIntoGalleryInternal(item, galleryName)
     }
@@ -2430,7 +2490,9 @@ class MainViewModel(
             metricsSummary = libraryItem.metricsSummary,
             curatorNote = curatorNote.ifBlank { "Added from Saved Asset Library" },
             mesh = libraryItem.mesh,
-            spriteSheet = libraryItem.spriteSheet
+            spriteSheet = libraryItem.spriteSheet,
+            gameTag = libraryItem.gameTag.ifBlank { "General Studio" },
+            groupTag = libraryItem.groupTag.ifBlank { "Core Roster" }
         )
         insertItemIntoGalleryInternal(item, galleryName)
     }
@@ -2461,7 +2523,9 @@ class MainViewModel(
                 meshFilePath = "",
                 spritePngBytes = historyEntity.spritePngBytes,
                 spriteColumns = historyEntity.spriteColumns,
-                spriteRows = historyEntity.spriteRows
+                spriteRows = historyEntity.spriteRows,
+                gameTag = historyEntity.gameTag.ifBlank { "General Studio" },
+                groupTag = historyEntity.groupTag.ifBlank { "Core Roster" }
             )
             insertItemIntoGalleryInternal(item, galleryName)
         }
@@ -2512,6 +2576,8 @@ class MainViewModel(
                 state.copy(
                     currentMesh = restoredMesh ?: state.currentMesh,
                     currentSpriteSheet = restoredSprite ?: state.currentSpriteSheet,
+                    activeGameTagForImports = item.gameTag.ifBlank { state.activeGameTagForImports },
+                    activeGroupTagForImports = item.groupTag.ifBlank { state.activeGroupTagForImports },
                     activeCharacterTagForImports = item.characterTag.ifBlank { state.activeCharacterTagForImports },
                     statusMessage = "Loaded '${item.title}' from gallery into Studio!"
                 )
@@ -2776,7 +2842,7 @@ class MainViewModel(
         return buildString {
             appendLine("Active 3D Mesh: ${state.currentMesh.name} (${state.currentMesh.vertexCount}v/${state.currentMesh.faceCount}f, format=${state.currentMesh.sourceFormat})")
             appendLine("Active 2D Spritesheet: ${state.currentSpriteSheet.name} (${state.currentSpriteSheet.columns}x${state.currentSpriteSheet.rows}, ${state.currentSpriteSheet.frames.size} frames)")
-            appendLine("Active Character Tag: ${state.activeCharacterTagForImports.ifBlank { "Studio" }}")
+            appendLine("Hierarchy Path: ${state.activeGameTagForImports} -> ${state.activeGroupTagForImports} -> ${state.activeCharacterTagForImports.ifBlank { "Studio" }}")
             appendLine("Detected Character Groups: $charGroups")
             appendLine("Hardware Target: ${state.selectedHardware.name} (${state.selectedHardware.shortName})")
             appendLine("Active Palette: $paletteHex")
@@ -2797,9 +2863,256 @@ class MainViewModel(
         )
     }
 
+    // -------------------------------------------------------------------------
+    // Game -> Group -> Character Tag Reassignment (Room v4 + Library)
+    // -------------------------------------------------------------------------
+
+    fun reassignGalleryItemTags(
+        itemId: Long,
+        gameTag: String,
+        groupTag: String,
+        characterTag: String
+    ) {
+        val cleanGame = gameTag.trim().ifBlank { "General Studio" }
+        val cleanGroup = groupTag.trim().ifBlank { "Core Roster" }
+        val cleanChar = characterTag.trim().ifBlank { "Studio Asset" }
+        val repo = galleryRepository
+        if (repo != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    repo.updateGalleryItemTags(itemId, cleanGame, cleanGroup, cleanChar)
+                    val refreshed = repo.getAllGalleriesWithItemsSnapshot()
+                    _uiState.update { state ->
+                        state.copy(
+                            assetGalleries = refreshed,
+                            statusMessage = "Updated gallery item tags -> $cleanGame / $cleanGroup / $cleanChar"
+                        )
+                    }
+                    return@launch
+                } catch (_: Exception) {
+                }
+            }
+        }
+        _uiState.update { state ->
+            state.copy(
+                assetGalleries = state.assetGalleries.map { entry ->
+                    entry.copy(
+                        items = entry.items.map { item ->
+                            if (item.id == itemId) {
+                                item.copy(gameTag = cleanGame, groupTag = cleanGroup, characterTag = cleanChar)
+                            } else {
+                                item
+                            }
+                        }
+                    )
+                },
+                statusMessage = "Updated gallery item tags -> $cleanGame / $cleanGroup / $cleanChar"
+            )
+        }
+    }
+
+    fun reassignHistoryItemTags(
+        id: Long,
+        gameTag: String,
+        groupTag: String,
+        characterTag: String
+    ) {
+        val cleanGame = gameTag.trim().ifBlank { "General Studio" }
+        val cleanGroup = groupTag.trim().ifBlank { "Core Roster" }
+        val cleanChar = characterTag.trim().ifBlank { "Studio Asset" }
+        val repo = historyRepository
+        if (repo != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    repo.updateHistoryTags(id, cleanGame, cleanGroup, cleanChar)
+                    val refreshed = repo.getAllHistorySnapshot()
+                    _uiState.update { state ->
+                        state.copy(
+                            roomAssetHistory = refreshed,
+                            statusMessage = "Updated history tags -> $cleanGame / $cleanGroup / $cleanChar"
+                        )
+                    }
+                    return@launch
+                } catch (_: Exception) {
+                }
+            }
+        }
+        _uiState.update { state ->
+            state.copy(
+                roomAssetHistory = state.roomAssetHistory.map { entity ->
+                    if (entity.id == id) {
+                        entity.copy(gameTag = cleanGame, groupTag = cleanGroup, characterTag = cleanChar)
+                    } else {
+                        entity
+                    }
+                },
+                statusMessage = "Updated history tags -> $cleanGame / $cleanGroup / $cleanChar"
+            )
+        }
+    }
+
+    fun reassignLibraryAssetTags(
+        id: String,
+        gameTag: String,
+        groupTag: String,
+        characterTag: String
+    ) {
+        val cleanGame = gameTag.trim().ifBlank { "General Studio" }
+        val cleanGroup = groupTag.trim().ifBlank { "Core Roster" }
+        val cleanChar = characterTag.trim().ifBlank { "Studio Asset" }
+        _uiState.update { state ->
+            state.copy(
+                savedLibraryAssets = state.savedLibraryAssets.map { asset ->
+                    if (asset.id == id) {
+                        asset.copy(gameTag = cleanGame, groupTag = cleanGroup, characterTag = cleanChar)
+                    } else {
+                        asset
+                    }
+                },
+                statusMessage = "Updated library tags -> $cleanGame / $cleanGroup / $cleanChar"
+            )
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Style-Locked True Fusion Prompt Studio Actions
+    // -------------------------------------------------------------------------
+
+    fun setPromptHardwareTier(tier: PromptHardwareTier) {
+        _uiState.update { it.copy(promptHardwareTier = tier) }
+    }
+
+    fun setPromptAssetPreset(preset: PromptAssetPreset) {
+        _uiState.update { it.copy(promptAssetPreset = preset) }
+    }
+
+    fun setIncludeHumanoidHeroicProportions(enabled: Boolean) {
+        _uiState.update { it.copy(includeHumanoidHeroicProportions = enabled) }
+    }
+
+    fun buildCurrentPromptStudioOutput(state: AppUiState = _uiState.value): PromptStudioOutput {
+        return PromptStudioEngine.buildPrompts(
+            subjectDescription = state.promptText.ifBlank { state.currentSpriteSheet.name },
+            tier = state.promptHardwareTier,
+            preset = state.promptAssetPreset,
+            includeHumanoidHeroicProportions = state.includeHumanoidHeroicProportions,
+            paletteHexList = state.extractedPalette.map { it.hex },
+            gameTag = state.activeGameTagForImports,
+            groupTag = state.activeGroupTagForImports,
+            characterTag = state.activeCharacterTagForImports
+        )
+    }
+
+    fun runPromptStudioViaActiveOmniAi() {
+        val output = buildCurrentPromptStudioOutput()
+        _uiState.update {
+            it.copy(
+                selectedTheme = ArtTheme.ARCADE_COMIC_CEL,
+                geminiCustomInstruction = output.fullSpec,
+                statusMessage = "Running Style-Locked Prompt (${output.tier.displayName} • ${output.preset.displayName}) via active OmniAiHub provider..."
+            )
+        }
+        runGeminiEnhancementOrVariantGeneration()
+    }
+
+    // -------------------------------------------------------------------------
+    // Canonical Asset & Official Spec Auditor Actions
+    // -------------------------------------------------------------------------
+
+    fun setAuditIntendedForPublicRelease(enabled: Boolean) {
+        _uiState.update { it.copy(auditIntendedForPublicRelease = enabled) }
+    }
+
+    fun runCanonicalAssetAudit(useOmniAiVision: Boolean = true) {
+        val snapshot = _uiState.value
+        val generatedBmp = snapshot.lastGeminiReport?.aiSynthesizedBitmap
+            ?: snapshot.currentSpriteSheet.sourceBitmap
+        val referenceBmp = snapshot.conceptArtBitmap
+        val activeGallery = snapshot.assetGalleries.firstOrNull { it.gallery.id == snapshot.selectedGalleryId }
+            ?: snapshot.assetGalleries.firstOrNull()
+        val indexJson = activeGallery?.let { buildMpvAssetIndexJson(it) }
+
+        viewModelScope.launch(Dispatchers.Default) {
+            _uiState.update { it.copy(isAuditingAsset = true) }
+            val contractReport = CanonicalAssetAndCodeAuditor.auditHardwareAndContractCompliance(
+                mesh = snapshot.currentMesh,
+                spriteSheet = snapshot.currentSpriteSheet,
+                hardwareSpec = snapshot.selectedHardware,
+                assetIndexJson = indexJson
+            )
+            val auditReport = if (useOmniAiVision) {
+                CanonicalAssetAndCodeAuditor.auditAssetWithOmniAi(
+                    generatedBitmap = generatedBmp,
+                    referenceBitmapOrNull = referenceBmp,
+                    targetHardware = snapshot.selectedHardware,
+                    intendedForPublicRelease = snapshot.auditIntendedForPublicRelease,
+                    sharedContextBlock = assembleSharedOmniContextBlock(queryHint = snapshot.promptText),
+                    assetTitle = snapshot.currentSpriteSheet.name
+                )
+            } else {
+                CanonicalAssetAndCodeAuditor.auditAssetLocally(
+                    generatedBitmap = generatedBmp,
+                    referenceBitmapOrNull = referenceBmp,
+                    targetHardware = snapshot.selectedHardware,
+                    intendedForPublicRelease = snapshot.auditIntendedForPublicRelease
+                )
+            }
+            _uiState.update {
+                it.copy(
+                    isAuditingAsset = false,
+                    lastAssetAuditReport = auditReport,
+                    lastContractComplianceReport = contractReport,
+                    statusMessage = "Audit Complete: ${auditReport.fidelityTag.label} • Style ${auditReport.styleFidelityScore}/100 • Delta ${auditReport.visualDeltaPercent}%"
+                )
+            }
+        }
+    }
+
+    fun approveAuditAndPurgeEphemeralSources(context: Context? = appContext) {
+        val ctx = context ?: appContext
+        val deleted = if (ctx != null) {
+            CanonicalAssetAndCodeAuditor.approveAndCleanEphemeralReference(ctx)
+        } else {
+            0
+        }
+        _uiState.update {
+            it.copy(
+                statusMessage = if (deleted > 0) {
+                    "Approved & purged $deleted ephemeral reference file(s) from cacheDir/ephemeral_sources."
+                } else {
+                    "Approved — ephemeral reference cache is already clean (0 temp files)."
+                }
+            )
+        }
+    }
+
     companion object {
         const val MPV_ASSET_INDEX_BASE_URL =
             "https://raw.githubusercontent.com/Summer-Warrior/Asset-Holding-Software/main/"
+
+        val ECOSYSTEM_GAME_PRESETS: List<String> = listOf(
+            "General Studio",
+            "PokéFusion Studio",
+            "MPV In-Universe MMO",
+            "NexusTCG / TCG Studio",
+            "Aegis Grid SRW",
+            "Chronicle Nexus",
+            "ChronoStage AI",
+            "MPV In-Universe ROMs"
+        )
+
+        val ECOSYSTEM_GROUP_PRESETS: List<String> = listOf(
+            "Core Roster",
+            "Protagonists",
+            "Bosses & Rivals",
+            "Official Baked Species",
+            "Infinite Fusions",
+            "Unique Fakemon (F-Slots)",
+            "Mechs & Vehicles",
+            "Stages & Props",
+            "TCG Cards",
+            "Audio & SFX"
+        )
 
         private fun sanitizeAssetSlug(raw: String, fallback: String): String {
             val slug = raw.lowercase()
@@ -2835,6 +3148,8 @@ class MainViewModel(
                     put("path", primaryPath)
                     put("title", item.title)
                     put("assetType", item.assetType)
+                    put("gameTag", item.gameTag)
+                    put("groupTag", item.groupTag)
                     put("characterTag", item.characterTag)
                     put("hardwareTarget", item.hardwareTarget)
                     put("gallery", galleryEntry.gallery.name)

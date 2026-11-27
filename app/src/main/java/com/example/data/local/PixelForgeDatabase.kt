@@ -17,7 +17,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         AssetGalleryEntity::class,
         AssetGalleryItemEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class PixelForgeDatabase : RoomDatabase() {
@@ -42,6 +42,19 @@ abstract class PixelForgeDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Explicit non-destructive migration from schema v3 -> v4 adding `gameTag` and `groupTag`
+         * columns for 3-level Game -> Group -> Character organization without wiping existing data.
+         */
+        val MIGRATION_3_4: Migration = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE asset_history ADD COLUMN gameTag TEXT NOT NULL DEFAULT 'General Studio'")
+                db.execSQL("ALTER TABLE asset_history ADD COLUMN groupTag TEXT NOT NULL DEFAULT 'Core Roster'")
+                db.execSQL("ALTER TABLE asset_gallery_items ADD COLUMN gameTag TEXT NOT NULL DEFAULT 'General Studio'")
+                db.execSQL("ALTER TABLE asset_gallery_items ADD COLUMN groupTag TEXT NOT NULL DEFAULT 'Core Roster'")
+            }
+        }
+
         fun getDatabase(context: Context): PixelForgeDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -49,7 +62,7 @@ abstract class PixelForgeDatabase : RoomDatabase() {
                     PixelForgeDatabase::class.java,
                     "pixelforge_asset_history.db"
                 )
-                    .addMigrations(MIGRATION_2_3)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
                     .build()
                 INSTANCE = instance
                 instance
@@ -64,7 +77,7 @@ abstract class PixelForgeDatabase : RoomDatabase() {
                 context.applicationContext,
                 PixelForgeDatabase::class.java
             )
-                .addMigrations(MIGRATION_2_3)
+                .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
                 .allowMainThreadQueries()
                 .build()
         }

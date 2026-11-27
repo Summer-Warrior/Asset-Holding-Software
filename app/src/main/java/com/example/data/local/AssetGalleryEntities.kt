@@ -60,7 +60,9 @@ data class AssetGalleryItemEntity(
     val spritePngBytes: ByteArray? = null,
     val spriteColumns: Int = 1,
     val spriteRows: Int = 1,
-    val addedAtMillis: Long = System.currentTimeMillis()
+    val addedAtMillis: Long = System.currentTimeMillis(),
+    val gameTag: String = "General Studio",
+    val groupTag: String = "Core Roster"
 ) {
     fun toMesh3D(context: Context? = null): Mesh3D? {
         val rawObj = objMeshData?.takeIf { it.isNotBlank() }
@@ -102,6 +104,8 @@ data class AssetGalleryItemEntity(
                 galleryId == other.galleryId &&
                 title == other.title &&
                 characterTag == other.characterTag &&
+                gameTag == other.gameTag &&
+                groupTag == other.groupTag &&
                 assetType == other.assetType &&
                 sourceOrigin == other.sourceOrigin &&
                 hardwareTarget == other.hardwareTarget &&
@@ -119,6 +123,9 @@ data class AssetGalleryItemEntity(
         var result = id.hashCode()
         result = 31 * result + galleryId.hashCode()
         result = 31 * result + title.hashCode()
+        result = 31 * result + characterTag.hashCode()
+        result = 31 * result + gameTag.hashCode()
+        result = 31 * result + groupTag.hashCode()
         result = 31 * result + assetType.hashCode()
         result = 31 * result + (objMeshData?.hashCode() ?: 0)
         result = 31 * result + meshFilePath.hashCode()
@@ -139,7 +146,9 @@ data class AssetGalleryItemEntity(
             curatorNote: String = "",
             mesh: Mesh3D? = null,
             spriteSheet: SpriteSheetData? = null,
-            addedAtMillis: Long = System.currentTimeMillis()
+            addedAtMillis: Long = System.currentTimeMillis(),
+            gameTag: String = "General Studio",
+            groupTag: String = "Core Roster"
         ): AssetGalleryItemEntity {
             val serializedObj = mesh?.let {
                 try {
@@ -183,7 +192,9 @@ data class AssetGalleryItemEntity(
                 spritePngBytes = encodedSpriteBytes,
                 spriteColumns = spriteSheet?.columns ?: 1,
                 spriteRows = spriteSheet?.rows ?: 1,
-                addedAtMillis = addedAtMillis
+                addedAtMillis = addedAtMillis,
+                gameTag = gameTag.ifBlank { "General Studio" },
+                groupTag = groupTag.ifBlank { "Core Roster" }
             )
         }
     }

@@ -809,7 +809,10 @@ class ExampleRobolectricTest {
       com.example.data.local.PixelForgeDatabase::class.java,
       migratedDbName
     )
-      .addMigrations(com.example.data.local.PixelForgeDatabase.MIGRATION_2_3)
+      .addMigrations(
+        com.example.data.local.PixelForgeDatabase.MIGRATION_2_3,
+        com.example.data.local.PixelForgeDatabase.MIGRATION_3_4
+      )
       .allowMainThreadQueries()
       .build()
     try {
@@ -1288,5 +1291,340 @@ class ExampleRobolectricTest {
     )
     com.example.ai.OmniAiRouter.clearProviderCredential(com.example.ai.AiProviderType.DIRECT_GEMINI)
   }
+
+  @Test
+  fun `test room migration 3 to 4 preserves existing rows with default game and group tags`() = kotlinx.coroutines.runBlocking {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val dbName = "pixelforge_migration_3_4_test_${System.currentTimeMillis()}.db"
+    val dbFile = context.getDatabasePath(dbName)
+    dbFile.parentFile?.mkdirs()
+    if (dbFile.exists()) dbFile.delete()
+
+    // 1. Seed a real v3 SQLite database (matching Room v3 schemas before gameTag & groupTag existed)
+    val rawDb = android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(dbFile, null)
+    try {
+      rawDb.execSQL(
+        """
+        CREATE TABLE IF NOT EXISTS `asset_history` (
+          `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+          `title` TEXT NOT NULL,
+          `characterTag` TEXT NOT NULL,
+          `assetType` TEXT NOT NULL,
+          `sourceOrigin` TEXT NOT NULL,
+          `hardwareTarget` TEXT NOT NULL,
+          `metricsSummary` TEXT NOT NULL,
+          `objMeshData` TEXT,
+          `meshFilePath` TEXT NOT NULL DEFAULT '',
+          `spritePngBytes` BLOB,
+          `spriteColumns` INTEGER NOT NULL,
+          `spriteRows` INTEGER NOT NULL,
+          `paletteHexCsv` TEXT NOT NULL,
+          `aiReviewNotes` TEXT,
+          `createdAtMillis` INTEGER NOT NULL
+        )
+        """.trimIndent()
+      )
+      rawDb.execSQL(
+        """
+        CREATE TABLE IF NOT EXISTS `asset_galleries` (
+          `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+          `name` TEXT NOT NULL,
+          `description` TEXT NOT NULL,
+          `themeTag` TEXT NOT NULL,
+          `accentColorHex` TEXT NOT NULL,
+          `layoutStyle` TEXT NOT NULL,
+          `createdAtMillis` INTEGER NOT NULL
+        )
+        """.trimIndent()
+      )
+      rawDb.execSQL(
+        """
+        CREATE TABLE IF NOT EXISTS `asset_gallery_items` (
+          `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+          `galleryId` INTEGER NOT NULL,
+          `title` TEXT NOT NULL,
+          `characterTag` TEXT NOT NULL,
+          `assetType` TEXT NOT NULL,
+          `sourceOrigin` TEXT NOT NULL,
+          `hardwareTarget` TEXT NOT NULL,
+          `metricsSummary` TEXT NOT NULL,
+          `curatorNote` TEXT NOT NULL,
+          `objMeshData` TEXT,
+          `meshFilePath` TEXT NOT NULL DEFAULT '',
+          `spritePngBytes` BLOB,
+          `spriteColumns` INTEGER NOT NULL,
+          `spriteRows` INTEGER NOT NULL,
+          `addedAtMillis` INTEGER NOT NULL,
+          FOREIGN KEY(`galleryId`) REFERENCES `asset_galleries`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+        )
+        """.trimIndent()
+      )
+      rawDb.execSQL("CREATE INDEX IF NOT EXISTS `index_asset_gallery_items_galleryId` ON `asset_gallery_items` (`galleryId`)")
+
+      rawDb.execSQL(
+        """
+        INSERT INTO asset_history (id, title, characterTag, assetType, sourceOrigin, hardwareTarget, metricsSummary, objMeshData, meshFilePath, spritePngBytes, spriteColumns, spriteRows, paletteHexCsv, aiReviewNotes, createdAtMillis)
+        VALUES (10, 'Legacy Cyber Mech', 'Kaelen', 'MODEL_3D', 'STUDIO', 'PS1', '128v/64f', 'v 0 0 0', '', NULL, 1, 1, '#00E5FF', NULL, 1700000000000)
+        """.trimIndent()
+      )
+      rawDb.execSQL(
+        """
+        INSERT INTO asset_galleries (id, name, description, themeTag, accentColorHex, layoutStyle, createdAtMillis)
+        VALUES (1, 'Legacy Showcase', 'Pre-v4 gallery', 'CYBERPUNK', '#00E5FF', 'GRID_2COL', 1700000000000)
+        """.trimIndent()
+      )
+      rawDb.execSQL(
+        """
+        INSERT INTO asset_gallery_items (id, galleryId, title, characterTag, assetType, sourceOrigin, hardwareTarget, metricsSummary, curatorNote, objMeshData, meshFilePath, spritePngBytes, spriteColumns, spriteRows, addedAtMillis)
+        VALUES (20, 1, 'Legacy Valkyrie Sheet', 'Valkyrie-09', 'SPRITE_2D', 'IMPORT', 'GBA', '4 frames', 'Curated in v3', NULL, '', NULL, 4, 1, 1700000000000)
+        """.trimIndent()
+      )
+      rawDb.version = 3
+    } finally {
+      rawDb.close()
+    }
+
+    // 2. Open with Room v4 using MIGRATION_3_4 (no destructive migration!)
+    val migratedDb = androidx.room.Room.databaseBuilder(
+      context,
+      com.example.data.local.PixelForgeDatabase::class.java,
+      dbName
+    )
+      .addMigrations(
+        com.example.data.local.PixelForgeDatabase.MIGRATION_2_3,
+        com.example.data.local.PixelForgeDatabase.MIGRATION_3_4
+      )
+      .allowMainThreadQueries()
+      .build()
+
+    try {
+      val historyRepo = com.example.data.local.AssetHistoryRepository(migratedDb.assetHistoryDao(), context)
+      val galleryRepo = com.example.data.local.AssetGalleryRepository(migratedDb.assetGalleryDao(), context)
+
+      val historyRows = historyRepo.getAllHistorySnapshot()
+      assertEquals(1, historyRows.size)
+      assertEquals("Legacy Cyber Mech", historyRows[0].title)
+      assertEquals("General Studio", historyRows[0].gameTag)
+      assertEquals("Core Roster", historyRows[0].groupTag)
+
+      val galleries = galleryRepo.getAllGalleriesWithItemsSnapshot()
+      assertEquals(1, galleries.size)
+      assertEquals(1, galleries[0].items.size)
+      assertEquals("Legacy Valkyrie Sheet", galleries[0].items[0].title)
+      assertEquals("General Studio", galleries[0].items[0].gameTag)
+      assertEquals("Core Roster", galleries[0].items[0].groupTag)
+
+      // 3. Verify 1-tap tag reassignment persists cleanly in v4
+      historyRepo.updateHistoryTags(10L, "Aegis Grid SRW", "Mechs & Vehicles", "Kaelen")
+      galleryRepo.updateGalleryItemTags(20L, "MPV In-Universe MMO", "Protagonists", "Valkyrie-09")
+
+      val updatedHist = historyRepo.getHistoryItemById(10L)
+      assertEquals("Aegis Grid SRW", updatedHist?.gameTag)
+      assertEquals("Mechs & Vehicles", updatedHist?.groupTag)
+
+      val updatedGalleryItem = galleryRepo.getAllGalleriesWithItemsSnapshot()[0].items[0]
+      assertEquals("MPV In-Universe MMO", updatedGalleryItem.gameTag)
+      assertEquals("Protagonists", updatedGalleryItem.groupTag)
+    } finally {
+      migratedDb.close()
+      dbFile.delete()
+    }
+  }
+
+  @Test
+  fun `test prompt studio engine constraints single active tier chroma key and zero positive checkerboard`() {
+    // 1. Verify updated ARCADE_COMIC_CEL_STYLE_BLOCK
+    assertTrue(
+      com.example.ai.GeminiAssetForge.ARCADE_COMIC_CEL_STYLE_BLOCK.contains("ink-pool shadows w/ ordered dithering & halftones")
+    )
+    assertTrue(
+      com.example.ai.GeminiAssetForge.ARCADE_COMIC_CEL_STYLE_BLOCK.contains("glowing Mana Circuits")
+    )
+
+    // 2. Long subject description + pink/magenta/purple palette -> Lime Green #00FF00 & compact <= 500 chars
+    val longDesc = "Sakura cyber-valkyrie guardian with glowing lavender plasma wings, neon magenta visor, checkerboard cape trim, and ornate cobalt gauntlet plating ".repeat(6)
+    val pinkOut = com.example.ai.PromptStudioEngine.buildPrompts(
+      subjectDescription = longDesc,
+      tier = com.example.ai.PromptHardwareTier.TRUE_FUSION_HD,
+      preset = com.example.ai.PromptAssetPreset.GRID_SHEET_2X4,
+      includeHumanoidHeroicProportions = false,
+      paletteHexList = listOf("#FF40C8", "#7B2CBF", "#00E5FF"),
+      gameTag = "MPV In-Universe MMO",
+      groupTag = "Protagonists",
+      characterTag = "Valkyrie-09"
+    )
+    assertEquals("#00FF00", pinkOut.chromaKey.hexCode)
+    assertTrue("compact500 must be <= 500 chars (was ${pinkOut.compact500.length})", pinkOut.compact500.length <= 500)
+    // Single active tier: TRUE_FUSION_HD uses comic halftone, NOT 16-bit BGR555 or 4x4 dithering
+    assertTrue(pinkOut.positiveSpecOnly.contains("halftone", ignoreCase = true))
+    assertEquals(false, pinkOut.positiveSpecOnly.contains("BGR555", ignoreCase = true))
+    assertEquals(false, pinkOut.positiveSpecOnly.contains("4x4 dithering", ignoreCase = true))
+    // Proportions toggle OFF -> omits 6.5-head
+    assertEquals(false, pinkOut.positiveSpecOnly.contains("6.5-head", ignoreCase = true))
+    assertEquals(false, pinkOut.compact500.contains("6.5-head", ignoreCase = true))
+    // Zero "checkerboard" inside positive prompts, present inside negative prompt
+    assertEquals(false, pinkOut.compact500.contains("checkerboard", ignoreCase = true))
+    assertEquals(false, pinkOut.natural4Sentence.contains("checkerboard", ignoreCase = true))
+    assertEquals(false, pinkOut.positiveSpecOnly.contains("checkerboard", ignoreCase = true))
+    assertTrue(pinkOut.negativePrompt.contains("checkerboard", ignoreCase = true))
+
+    // 3. Non-pink/purple subject -> Magenta #FF00FF, 6.5-head toggle ON, 16-bit tier only, 4 clean sentences
+    val knightOut = com.example.ai.PromptStudioEngine.buildPrompts(
+      subjectDescription = "cobalt armored knight holding a golden solar shield",
+      tier = com.example.ai.PromptHardwareTier.PIXEL_16BIT,
+      preset = com.example.ai.PromptAssetPreset.SINGLE_SPRITE_1X1,
+      includeHumanoidHeroicProportions = true,
+      paletteHexList = listOf("#1D4ED8", "#FACC15", "#0F172A")
+    )
+    assertEquals("#FF00FF", knightOut.chromaKey.hexCode)
+    assertTrue(knightOut.compact500.length <= 500)
+    assertTrue(knightOut.positiveSpecOnly.contains("BGR555"))
+    assertEquals(false, knightOut.positiveSpecOnly.contains("halftone", ignoreCase = true))
+    assertTrue(knightOut.positiveSpecOnly.contains("6.5-head"))
+    assertTrue(knightOut.natural4Sentence.contains("6.5-head"))
+    // Count sentences in natural4Sentence (should be 4 periods ending 4 sentences)
+    val sentenceCount = knightOut.natural4Sentence.split(Regex("(?<=\\.)\\s+")).filter { it.isNotBlank() }.size
+    assertEquals(4, sentenceCount)
+  }
+
+  @Test
+  fun `test canonical asset auditor delta ip clean room chroma bleed ephemeral sweep and contracts`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val ps1 = ConsoleHardwareCatalog.getById("ps1")
+
+    // Helper: clean transparent-bordered 64x64 sprite with solid cyan square inside
+    fun makeCleanSprite(fillColor: Int, offsetX: Int = 12): android.graphics.Bitmap {
+      val bmp = android.graphics.Bitmap.createBitmap(64, 64, android.graphics.Bitmap.Config.ARGB_8888)
+      bmp.eraseColor(android.graphics.Color.TRANSPARENT)
+      for (y in 12 until 52) {
+        for (x in offsetX until (offsetX + 36).coerceAtMost(60)) {
+          bmp.setPixel(x, y, fillColor)
+        }
+      }
+      return bmp
+    }
+
+    val spriteA = makeCleanSprite(android.graphics.Color.rgb(0, 229, 255), offsetX = 12)
+    val spriteIdentical = makeCleanSprite(android.graphics.Color.rgb(0, 229, 255), offsetX = 12)
+    val spriteRedesigned = makeCleanSprite(android.graphics.Color.rgb(255, 160, 0), offsetX = 24)
+
+    // 1. Identical bitmaps -> visualDeltaPercent == 0 & NEEDS_REVISION
+    val identicalReport = com.example.ai.CanonicalAssetAndCodeAuditor.auditAssetLocally(
+      generatedBitmap = spriteA,
+      referenceBitmapOrNull = spriteIdentical,
+      targetHardware = ps1,
+      intendedForPublicRelease = false
+    )
+    assertEquals(0, identicalReport.visualDeltaPercent)
+    assertEquals(com.example.ai.AssetFidelityTag.NEEDS_REVISION, identicalReport.fidelityTag)
+    assertTrue(identicalReport.regressionOrIpFlags.any { it.contains("15%") })
+
+    // 2. Meaningfully redesigned bitmap with reference (Private Fan-Derived)
+    val redesignedPrivate = com.example.ai.CanonicalAssetAndCodeAuditor.auditAssetLocally(
+      generatedBitmap = spriteRedesigned,
+      referenceBitmapOrNull = spriteA,
+      targetHardware = ps1,
+      intendedForPublicRelease = false
+    )
+    assertTrue("Expected visualDelta >= 15%, got ${redesignedPrivate.visualDeltaPercent}", redesignedPrivate.visualDeltaPercent >= 15)
+    assertEquals(com.example.ai.AssetFidelityTag.PRIVATE_FAN_DERIVED, redesignedPrivate.fidelityTag)
+    assertTrue(redesignedPrivate.chromaAndAlphaClean)
+
+    // 3. Same derived bitmap marked intendedForPublicRelease = true -> NEEDS_REVISION IP guard
+    val redesignedPublic = com.example.ai.CanonicalAssetAndCodeAuditor.auditAssetLocally(
+      generatedBitmap = spriteRedesigned,
+      referenceBitmapOrNull = spriteA,
+      targetHardware = ps1,
+      intendedForPublicRelease = true
+    )
+    assertEquals(com.example.ai.AssetFidelityTag.NEEDS_REVISION, redesignedPublic.fidelityTag)
+    assertTrue(redesignedPublic.regressionOrIpFlags.any { it.contains("Public Release", ignoreCase = true) })
+
+    // 4. Clean standalone bitmap -> PUBLIC_CLEAN_ROOM
+    val cleanStandalone = com.example.ai.CanonicalAssetAndCodeAuditor.auditAssetLocally(
+      generatedBitmap = spriteA,
+      referenceBitmapOrNull = null,
+      targetHardware = ps1,
+      intendedForPublicRelease = true
+    )
+    assertEquals(com.example.ai.AssetFidelityTag.PUBLIC_CLEAN_ROOM, cleanStandalone.fidelityTag)
+    assertEquals(100, cleanStandalone.visualDeltaPercent)
+
+    // 5. Unstripped opaque magenta chroma-key border -> chromaAndAlphaClean == false & NEEDS_REVISION
+    val magentaBorderBmp = android.graphics.Bitmap.createBitmap(64, 64, android.graphics.Bitmap.Config.ARGB_8888)
+    magentaBorderBmp.eraseColor(android.graphics.Color.rgb(255, 0, 255))
+    val chromaReport = com.example.ai.CanonicalAssetAndCodeAuditor.auditAssetLocally(
+      generatedBitmap = magentaBorderBmp,
+      referenceBitmapOrNull = null,
+      targetHardware = ps1,
+      intendedForPublicRelease = false
+    )
+    assertEquals(false, chromaReport.chromaAndAlphaClean)
+    assertEquals(com.example.ai.AssetFidelityTag.NEEDS_REVISION, chromaReport.fidelityTag)
+
+    // 6. approveAndCleanEphemeralReference purges cacheDir/ephemeral_sources
+    val ephDir = java.io.File(context.cacheDir, "ephemeral_sources")
+    ephDir.mkdirs()
+    val tmpRef = java.io.File(ephDir, "temp_audit_ref.png")
+    tmpRef.writeText("ephemeral")
+    assertTrue(tmpRef.exists())
+    val purged = com.example.ai.CanonicalAssetAndCodeAuditor.approveAndCleanEphemeralReference(context)
+    assertTrue(purged >= 1)
+    assertEquals(false, tmpRef.exists())
+
+    // 7. Hardware & JSON contract compliance check
+    val validIndexJson = """
+      {
+        "baseUrl": "https://raw.githubusercontent.com/Summer-Warrior/Asset-Holding-Software/main/",
+        "assets": [
+          { "key": "cyber_pack/kaelen", "path": "assets/cyber_pack/kaelen.png" }
+        ]
+      }
+    """.trimIndent()
+    val contractReport = com.example.ai.CanonicalAssetAndCodeAuditor.auditHardwareAndContractCompliance(
+      mesh = ProceduralMeshes.createSciFiStarfighter(),
+      spriteSheet = SampleSpriteSheets.createCyberNinjaSheet(),
+      hardwareSpec = ps1,
+      assetIndexJson = validIndexJson
+    )
+    assertTrue(contractReport.contractJsonPassed)
+    assertTrue(contractReport.passedChecks.isNotEmpty())
+  }
+
+  @Test
+  fun `test asset resolver bound slots geometric placeholder fallback and skin manifest json`() {
+    val manifest = com.example.model.vault.SkinManifest(
+      skinId = "mpv-arcade-cel-v1",
+      displayName = "MPV 32-Bit Arcade Cel Pack",
+      gameTag = "MPV In-Universe MMO",
+      slotBindings = mapOf(
+        "hero_idle_sheet" to "assets/mpv/protagonists/kaelen_idle.png",
+        "boss_mech_mesh" to "assets/mpv/bosses/valkyrie_mech.obj"
+      )
+    )
+    val resolver = com.example.model.vault.AssetResolver(manifest)
+
+    // 1. Bound slot resolves cleanly to BoundAsset
+    val bound = resolver.resolve("hero_idle_sheet")
+    assertTrue(bound is com.example.model.vault.ResolvedAsset.BoundAsset)
+    val boundAsset = bound as com.example.model.vault.ResolvedAsset.BoundAsset
+    assertEquals("assets/mpv/protagonists/kaelen_idle.png", boundAsset.assetPath)
+    assertEquals("mpv-arcade-cel-v1", boundAsset.skinId)
+
+    // 2. Missing slot returns deterministic GeometricPlaceholder without crashing
+    val missing = resolver.resolve("unassigned_secret_stage_bg")
+    assertTrue(missing is com.example.model.vault.ResolvedAsset.GeometricPlaceholder)
+    val placeholder = missing as com.example.model.vault.ResolvedAsset.GeometricPlaceholder
+    assertEquals("unassigned_secret_stage_bg", placeholder.slotName)
+    assertTrue(placeholder.fallbackColorHex.startsWith("#"))
+
+    // 3. SkinManifest JSON round-trip preserves skinId, gameTag, and slotBindings
+    val json = manifest.toJsonString()
+    val parsed = com.example.model.vault.SkinManifest.fromJsonString(json)
+    assertEquals(manifest.skinId, parsed.skinId)
+    assertEquals(manifest.gameTag, parsed.gameTag)
+    assertEquals(manifest.slotBindings, parsed.slotBindings)
+  }
 }
+
 

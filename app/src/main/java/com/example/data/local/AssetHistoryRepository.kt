@@ -63,6 +63,20 @@ class AssetHistoryRepository(
         assetHistoryDao.clearAllHistory()
     }
 
+    suspend fun updateHistoryTags(
+        id: Long,
+        gameTag: String,
+        groupTag: String,
+        characterTag: String
+    ) {
+        assetHistoryDao.updateHistoryTags(
+            id = id,
+            gameTag = gameTag.trim().ifBlank { "General Studio" },
+            groupTag = groupTag.trim().ifBlank { "Core Roster" },
+            characterTag = characterTag.trim().ifBlank { "Studio Asset" }
+        )
+    }
+
     suspend fun getHistoryCount(): Int =
         assetHistoryDao.getHistoryCount()
 }

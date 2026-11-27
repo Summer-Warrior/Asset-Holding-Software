@@ -127,7 +127,7 @@ object GeminiAssetForge {
 
     const val ARCADE_COMIC_CEL_STYLE_PRESET_TITLE: String = "32-Bit Arcade Comic-Cel Fusion"
     const val ARCADE_COMIC_CEL_STYLE_BLOCK: String =
-        "32-bit arcade & 2D comic-cel style: punchy high-contrast ramps, crisp edges, clearcoat armor/visors w/ glints vs matte skin/fabric, bold inked silhouettes & vibrant 32-bit cel shading."
+        "32-bit arcade & 2D comic-cel style: punchy high-contrast ramps, crisp edges, clearcoat armor/visors w/ glints vs matte skin/fabric, bold black ink, hard 2-step cel-shading, ink-pool shadows w/ ordered dithering & halftones, anime rim-light, glowing Mana Circuits, cartoon color-blocking. No 3D, photorealism, blur, airbrush, text, grids."
 
     /**
      * Structured JSON Schema for `gemini-3.8-flash` asset enhancement and multi-variant generation.

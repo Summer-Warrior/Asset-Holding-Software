@@ -80,6 +80,20 @@ class AssetGalleryRepository(
         assetGalleryDao.deleteGalleryItemById(itemId)
     }
 
+    suspend fun updateGalleryItemTags(
+        itemId: Long,
+        gameTag: String,
+        groupTag: String,
+        characterTag: String
+    ) {
+        assetGalleryDao.updateItemTags(
+            itemId = itemId,
+            gameTag = gameTag.trim().ifBlank { "General Studio" },
+            groupTag = groupTag.trim().ifBlank { "Core Roster" },
+            characterTag = characterTag.trim().ifBlank { "Studio Asset" }
+        )
+    }
+
     suspend fun getGalleryCount(): Int =
         assetGalleryDao.getGalleryCount()
 }
