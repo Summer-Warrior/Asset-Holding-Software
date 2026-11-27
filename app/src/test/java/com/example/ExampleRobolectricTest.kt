@@ -2089,6 +2089,136 @@ class ExampleRobolectricTest {
     assertTrue(java.io.File(hydratedOld.localFilePath).exists())
     assertTrue(jsonOld.contentEquals(java.io.File(hydratedOld.localFilePath).readBytes()))
   }
+
+  @Test
+  fun `test scratch sprite canvas engine blank creation mirror paint flood fill frames and export`() {
+    val engine = com.example.model.sprite.SpriteCanvasEditorEngine
+
+    // 1. Blank 16x16 2-frame project starts 100% transparent
+    val blank = engine.createBlankProject(
+      name = "Emerald Hatchling",
+      width = 16,
+      height = 16,
+      frameCount = 2
+    )
+    assertEquals("Emerald Hatchling", blank.name)
+    assertEquals(16, blank.width)
+    assertEquals(16, blank.height)
+    assertEquals(2, blank.frames.size)
+    blank.frames.forEach { frame ->
+      assertEquals(256, frame.size)
+      assertTrue(
+        "Every pixel in a blank scratch frame must start Color.TRANSPARENT",
+        frame.all { it == android.graphics.Color.TRANSPARENT }
+      )
+    }
+
+    // 2. Paint with mirrorX = true at (2, 4) -> paints both (2, 4) and (13, 4)
+    val emerald = android.graphics.Color.rgb(16, 185, 129)
+    val mirrored = engine.paintPixel(
+      framePixels = blank.frames[0],
+      width = 16,
+      height = 16,
+      x = 2,
+      y = 4,
+      colorInt = emerald,
+      brushSize = 1,
+      mirrorX = true
+    )
+    assertEquals(emerald, mirrored[4 * 16 + 2])
+    assertEquals(emerald, mirrored[4 * 16 + 13])
+    assertEquals(android.graphics.Color.TRANSPARENT, mirrored[4 * 16 + 3])
+
+    // 3. Draw closed 6x6 border from x=5..10, y=5..10 and flood-fill interior at (7, 7)
+    val borderColor = android.graphics.Color.rgb(15, 23, 42)
+    val fillColor = android.graphics.Color.rgb(56, 189, 248)
+    var boxed = blank.frames[0].copyOf()
+    for (x in 5..10) {
+      boxed = engine.paintPixel(boxed, 16, 16, x, 5, borderColor)
+      boxed = engine.paintPixel(boxed, 16, 16, x, 10, borderColor)
+    }
+    for (y in 5..10) {
+      boxed = engine.paintPixel(boxed, 16, 16, 5, y, borderColor)
+      boxed = engine.paintPixel(boxed, 16, 16, 10, y, borderColor)
+    }
+    val filled = engine.floodFill(boxed, 16, 16, 7, 7, fillColor)
+
+    // Verify interior (6..9, 6..9) is filled, border stays borderColor, exterior stays transparent
+    for (y in 6..9) {
+      for (x in 6..9) {
+        assertEquals("Interior pixel ($x,$y) must be flood-filled", fillColor, filled[y * 16 + x])
+      }
+    }
+    assertEquals(borderColor, filled[5 * 16 + 5])
+    assertEquals(android.graphics.Color.TRANSPARENT, filled[0])
+    assertEquals(android.graphics.Color.TRANSPARENT, filled[15 * 16 + 15])
+
+    // 4. Duplicate active frame & export to SpriteSheetData
+    val withDrawnFrame = blank.copy(frames = listOf(filled, blank.frames[1]), activeFrameIndex = 0)
+    val duplicated = engine.duplicateActiveFrame(withDrawnFrame)
+    assertEquals(3, duplicated.frames.size)
+    assertEquals(1, duplicated.activeFrameIndex)
+    assertTrue("Duplicated frame pixels must match original frame", duplicated.frames[1].contentEquals(filled))
+
+    val sheet = engine.exportProjectToSpriteSheet(duplicated)
+    assertEquals("CREATED FROM SCRATCH", sheet.sourceKindLabel)
+    assertEquals("Emerald Hatchling", sheet.name)
+    assertEquals(3, sheet.frames.size)
+    assertEquals(16, sheet.frameWidth)
+    assertEquals(16, sheet.frameHeight)
+    assertEquals(fillColor, sheet.frames[0].getPixel(7, 7))
+    assertEquals(fillColor, sheet.frames[1].getPixel(7, 7))
+    assertEquals(android.graphics.Color.TRANSPARENT, sheet.frames[2].getPixel(7, 7))
+  }
+
+  @Test
+  fun `test main viewmodel scratch canvas undo redo and commit to studio library and history`() {
+    val vm = MainViewModel()
+    val initialLibrarySize = vm.uiState.value.savedLibraryAssets.size
+
+    // 1. Start a fresh blank 16x16 1-frame project
+    vm.startNewBlankSpriteProject(name = "Original Dragon", sizePx = 16, frameCount = 1)
+    assertEquals("Original Dragon", vm.uiState.value.scratchSpriteProject.name)
+    assertFalse(vm.uiState.value.scratchCanUndo)
+    assertFalse(vm.uiState.value.scratchCanRedo)
+
+    // 2. Paint a pixel with undo snapshot enabled
+    val goldColor = android.graphics.Color.rgb(245, 158, 11)
+    vm.setPixelDrawTool(com.example.model.sprite.PixelDrawTool.PENCIL)
+    vm.setBrushColorInt(goldColor)
+    vm.setBrushSizePx(1)
+    vm.applyCanvasStrokeAt(x = 4, y = 6, pushUndoSnapshot = true)
+
+    assertEquals(goldColor, vm.uiState.value.scratchSpriteProject.activeFramePixels[6 * 16 + 4])
+    assertTrue("scratchCanUndo must become true after stroke", vm.uiState.value.scratchCanUndo)
+    assertFalse(vm.uiState.value.scratchCanRedo)
+
+    // 3. Undo reverts canvas back to transparent and enables redo
+    vm.undoScratchSprite()
+    assertEquals(
+      android.graphics.Color.TRANSPARENT,
+      vm.uiState.value.scratchSpriteProject.activeFramePixels[6 * 16 + 4]
+    )
+    assertFalse(vm.uiState.value.scratchCanUndo)
+    assertTrue("scratchCanRedo must become true after undo", vm.uiState.value.scratchCanRedo)
+
+    // 4. Redo restores painted pixel
+    vm.redoScratchSprite()
+    assertEquals(goldColor, vm.uiState.value.scratchSpriteProject.activeFramePixels[6 * 16 + 4])
+    assertTrue(vm.uiState.value.scratchCanUndo)
+    assertFalse(vm.uiState.value.scratchCanRedo)
+
+    // 5. Commit to Studio, Saved Library & Room History
+    vm.commitScratchSpriteProjectToStudioAndVault()
+    val state = vm.uiState.value
+    assertEquals("Original Dragon", state.currentSpriteSheet.name)
+    assertEquals("CREATED FROM SCRATCH", state.currentSpriteSheet.sourceKindLabel)
+    assertEquals(initialLibrarySize + 1, state.savedLibraryAssets.size)
+    assertTrue(
+      "roomAssetHistory must contain an entry with sourceOrigin == SCRATCH 2D CANVAS",
+      state.roomAssetHistory.any { it.sourceOrigin == "SCRATCH 2D CANVAS" && it.title == "Original Dragon" }
+    )
+  }
 }
 
 

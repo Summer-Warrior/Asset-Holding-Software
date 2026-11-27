@@ -77,7 +77,10 @@ import com.example.model.masterpack.ThreeMapRecolorEngine
 import com.example.model.model3d.Mesh3D
 import com.example.model.model3d.ObjParser
 import com.example.model.model3d.ProceduralMeshes
+import com.example.model.sprite.PixelDrawTool
 import com.example.model.sprite.SampleSpriteSheets
+import com.example.model.sprite.ScratchSpriteProject
+import com.example.model.sprite.SpriteCanvasEditorEngine
 import com.example.model.sprite.SpriteSheetData
 import com.example.model.suite.AssetSuiteSynthesizer
 import com.example.model.suite.CharacterAssetFusionEngine
@@ -206,7 +209,19 @@ data class AppUiState(
     val hotCacheStats: HotCacheStats = HotCacheStats(0L, HotPhoneLruCacheManager.DEFAULT_MAX_CACHE_BYTES, 0, 0, 0f),
     val coldVaultEndpointConfig: ColdVaultEndpointConfig = ColdVaultEndpointConfig(),
     val isVaultPinConfigured: Boolean = false,
-    val isVaultUnlocked: Boolean = true
+    val isVaultUnlocked: Boolean = true,
+    // From-Scratch 2D Pixel & Animation Canvas Editor + Pure From-Scratch AI Asset Creator
+    val scratchSpriteProject: ScratchSpriteProject = SpriteCanvasEditorEngine.createBlankProject("New Original Sprite", 32, 32, 1),
+    val activeDrawTool: PixelDrawTool = PixelDrawTool.PENCIL,
+    val activeBrushColorInt: Int = Color.rgb(0x00, 0xE5, 0xFF),
+    val activeBrushSizePx: Int = 1,
+    val scratchOnionSkinEnabled: Boolean = true,
+    val scratchCanUndo: Boolean = false,
+    val scratchCanRedo: Boolean = false,
+    val scratchCreateAssetName: String = "",
+    val isCreatingFromScratchWithAi: Boolean = false,
+    val lastScratchAiCreationBitmap: Bitmap? = null,
+    val lastScratchAiError: String? = null
 )
 
 class MainViewModel(
@@ -219,6 +234,9 @@ class MainViewModel(
     private var appContext: Context? = null
     private var historyCollectionStarted = false
     private var galleryCollectionStarted = false
+    private val scratchUndoStack = ArrayDeque<ScratchSpriteProject>()
+    private val scratchRedoStack = ArrayDeque<ScratchSpriteProject>()
+    private val maxScratchUndoSnapshots = 20
 
     init {
         val initialPool = CharacterAssetFusionEngine.createInitialCharacterAssetPool()
@@ -3841,6 +3859,468 @@ class MainViewModel(
             crySpec = crySpec,
             scoreSpec = scoreSpec
         )
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    // FROM-SCRATCH 2D SPRITE/ANIMATION CANVAS EDITOR & PURE FROM-SCRATCH AI ASSET CREATOR
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+
+    private fun pushScratchUndoSnapshot(projectSnapshot: ScratchSpriteProject) {
+        if (scratchUndoStack.size >= maxScratchUndoSnapshots) {
+            scratchUndoStack.removeFirst()
+        }
+        scratchUndoStack.addLast(projectSnapshot.deepCopy())
+        scratchRedoStack.clear()
+    }
+
+    fun startNewBlankSpriteProject(name: String, sizePx: Int, frameCount: Int) {
+        val cleanName = name.trim().ifBlank { "New Original Sprite" }
+        val blankProject = SpriteCanvasEditorEngine.createBlankProject(
+            name = cleanName,
+            width = sizePx,
+            height = sizePx,
+            frameCount = frameCount
+        )
+        scratchUndoStack.clear()
+        scratchRedoStack.clear()
+        _uiState.update { state ->
+            state.copy(
+                scratchSpriteProject = blankProject,
+                scratchCanUndo = false,
+                scratchCanRedo = false,
+                statusMessage = "Started blank ${blankProject.width}×${blankProject.height}px canvas (${blankProject.frames.size} frame${if (blankProject.frames.size == 1) "" else "s"}) for '${blankProject.name}'."
+            )
+        }
+    }
+
+    fun updateScratchSpriteName(name: String) {
+        _uiState.update { state ->
+            state.copy(
+                scratchSpriteProject = state.scratchSpriteProject.copy(name = name)
+            )
+        }
+    }
+
+    fun setPixelDrawTool(tool: PixelDrawTool) {
+        _uiState.update { it.copy(activeDrawTool = tool) }
+    }
+
+    fun setBrushColorInt(colorInt: Int) {
+        _uiState.update { it.copy(activeBrushColorInt = colorInt) }
+    }
+
+    fun setBrushSizePx(size: Int) {
+        _uiState.update { it.copy(activeBrushSizePx = size.coerceIn(1, 3)) }
+    }
+
+    fun toggleScratchMirrorX() {
+        _uiState.update { state ->
+            val nextMirror = !state.scratchSpriteProject.mirrorX
+            state.copy(
+                scratchSpriteProject = state.scratchSpriteProject.copy(mirrorX = nextMirror),
+                statusMessage = if (nextMirror) "Mirror X symmetry enabled." else "Mirror X symmetry disabled."
+            )
+        }
+    }
+
+    fun toggleScratchOnionSkin() {
+        _uiState.update { state ->
+            state.copy(scratchOnionSkinEnabled = !state.scratchOnionSkinEnabled)
+        }
+    }
+
+    fun applyCanvasStrokeAt(x: Int, y: Int, pushUndoSnapshot: Boolean) {
+        val state = _uiState.value
+        val project = state.scratchSpriteProject
+        if (x !in 0 until project.width || y !in 0 until project.height) return
+        val activeIdx = project.activeFrameIndex.coerceIn(0, (project.frames.size - 1).coerceAtLeast(0))
+        val currentPixels = project.frames.getOrNull(activeIdx) ?: return
+
+        if (state.activeDrawTool == PixelDrawTool.EYEDROPPER) {
+            val pickedColor = currentPixels[y * project.width + x]
+            val resolvedColor = if (Color.alpha(pickedColor) == 0) state.activeBrushColorInt else pickedColor
+            _uiState.update {
+                it.copy(
+                    activeBrushColorInt = resolvedColor,
+                    activeDrawTool = PixelDrawTool.PENCIL
+                )
+            }
+            return
+        }
+
+        val updatedFramePixels = when (state.activeDrawTool) {
+            PixelDrawTool.PENCIL -> SpriteCanvasEditorEngine.paintPixel(
+                framePixels = currentPixels,
+                width = project.width,
+                height = project.height,
+                x = x,
+                y = y,
+                colorInt = state.activeBrushColorInt,
+                brushSize = state.activeBrushSizePx,
+                mirrorX = project.mirrorX
+            )
+            PixelDrawTool.ERASER -> SpriteCanvasEditorEngine.paintPixel(
+                framePixels = currentPixels,
+                width = project.width,
+                height = project.height,
+                x = x,
+                y = y,
+                colorInt = Color.TRANSPARENT,
+                brushSize = state.activeBrushSizePx,
+                mirrorX = project.mirrorX
+            )
+            PixelDrawTool.FILL_BUCKET -> SpriteCanvasEditorEngine.floodFill(
+                framePixels = currentPixels,
+                width = project.width,
+                height = project.height,
+                startX = x,
+                startY = y,
+                replacementColor = state.activeBrushColorInt
+            )
+            PixelDrawTool.EYEDROPPER -> currentPixels
+        }
+
+        if (updatedFramePixels.contentEquals(currentPixels)) return
+
+        if (pushUndoSnapshot) {
+            pushScratchUndoSnapshot(project)
+        }
+
+        val newFrames = project.frames.mapIndexed { idx, buf ->
+            if (idx == activeIdx) updatedFramePixels else buf
+        }
+        _uiState.update { s ->
+            s.copy(
+                scratchSpriteProject = project.copy(frames = newFrames),
+                scratchCanUndo = scratchUndoStack.isNotEmpty(),
+                scratchCanRedo = scratchRedoStack.isNotEmpty()
+            )
+        }
+    }
+
+    fun undoScratchSprite() {
+        if (scratchUndoStack.isEmpty()) return
+        val current = _uiState.value.scratchSpriteProject
+        if (scratchRedoStack.size >= maxScratchUndoSnapshots) {
+            scratchRedoStack.removeFirst()
+        }
+        scratchRedoStack.addLast(current.deepCopy())
+        val previous = scratchUndoStack.removeLast()
+        _uiState.update { state ->
+            state.copy(
+                scratchSpriteProject = previous,
+                scratchCanUndo = scratchUndoStack.isNotEmpty(),
+                scratchCanRedo = scratchRedoStack.isNotEmpty()
+            )
+        }
+    }
+
+    fun redoScratchSprite() {
+        if (scratchRedoStack.isEmpty()) return
+        val current = _uiState.value.scratchSpriteProject
+        if (scratchUndoStack.size >= maxScratchUndoSnapshots) {
+            scratchUndoStack.removeFirst()
+        }
+        scratchUndoStack.addLast(current.deepCopy())
+        val next = scratchRedoStack.removeLast()
+        _uiState.update { state ->
+            state.copy(
+                scratchSpriteProject = next,
+                scratchCanUndo = scratchUndoStack.isNotEmpty(),
+                scratchCanRedo = scratchRedoStack.isNotEmpty()
+            )
+        }
+    }
+
+    fun selectScratchFrame(index: Int) {
+        _uiState.update { state ->
+            val maxIdx = (state.scratchSpriteProject.frames.size - 1).coerceAtLeast(0)
+            state.copy(
+                scratchSpriteProject = state.scratchSpriteProject.copy(
+                    activeFrameIndex = index.coerceIn(0, maxIdx)
+                )
+            )
+        }
+    }
+
+    fun addBlankScratchFrame() {
+        val current = _uiState.value.scratchSpriteProject
+        if (current.frames.size >= SpriteCanvasEditorEngine.MAX_FRAME_COUNT) {
+            postStatusMessage("Maximum ${SpriteCanvasEditorEngine.MAX_FRAME_COUNT} animation frames reached.")
+            return
+        }
+        pushScratchUndoSnapshot(current)
+        val updated = SpriteCanvasEditorEngine.addBlankFrame(current)
+        _uiState.update { state ->
+            state.copy(
+                scratchSpriteProject = updated,
+                scratchCanUndo = scratchUndoStack.isNotEmpty(),
+                scratchCanRedo = scratchRedoStack.isNotEmpty(),
+                statusMessage = "Added blank frame #${updated.frames.size}."
+            )
+        }
+    }
+
+    fun duplicateActiveScratchFrame() {
+        val current = _uiState.value.scratchSpriteProject
+        if (current.frames.size >= SpriteCanvasEditorEngine.MAX_FRAME_COUNT) {
+            postStatusMessage("Maximum ${SpriteCanvasEditorEngine.MAX_FRAME_COUNT} animation frames reached.")
+            return
+        }
+        pushScratchUndoSnapshot(current)
+        val updated = SpriteCanvasEditorEngine.duplicateActiveFrame(current)
+        _uiState.update { state ->
+            state.copy(
+                scratchSpriteProject = updated,
+                scratchCanUndo = scratchUndoStack.isNotEmpty(),
+                scratchCanRedo = scratchRedoStack.isNotEmpty(),
+                statusMessage = "Duplicated frame to slot #${updated.activeFrameIndex + 1}."
+            )
+        }
+    }
+
+    fun deleteActiveScratchFrame() {
+        val current = _uiState.value.scratchSpriteProject
+        if (current.frames.size <= SpriteCanvasEditorEngine.MIN_FRAME_COUNT) {
+            postStatusMessage("At least 1 animation frame is required.")
+            return
+        }
+        pushScratchUndoSnapshot(current)
+        val updated = SpriteCanvasEditorEngine.deleteActiveFrame(current)
+        _uiState.update { state ->
+            state.copy(
+                scratchSpriteProject = updated,
+                scratchCanUndo = scratchUndoStack.isNotEmpty(),
+                scratchCanRedo = scratchRedoStack.isNotEmpty(),
+                statusMessage = "Deleted frame (${updated.frames.size} frame${if (updated.frames.size == 1) "" else "s"} remaining)."
+            )
+        }
+    }
+
+    fun clearActiveScratchFrame() {
+        val current = _uiState.value.scratchSpriteProject
+        pushScratchUndoSnapshot(current)
+        val updated = SpriteCanvasEditorEngine.clearActiveFrame(current)
+        _uiState.update { state ->
+            state.copy(
+                scratchSpriteProject = updated,
+                scratchCanUndo = scratchUndoStack.isNotEmpty(),
+                scratchCanRedo = scratchRedoStack.isNotEmpty(),
+                statusMessage = "Cleared active frame to transparent."
+            )
+        }
+    }
+
+    fun setScratchFps(fps: Int) {
+        _uiState.update { state ->
+            state.copy(
+                scratchSpriteProject = state.scratchSpriteProject.copy(fps = fps.coerceIn(1, 30))
+            )
+        }
+    }
+
+    fun commitScratchSpriteProjectToStudioAndVault() {
+        val snapshot = _uiState.value
+        val project = snapshot.scratchSpriteProject
+        val exportedSheet = SpriteCanvasEditorEngine.exportProjectToSpriteSheet(project)
+        val activeGame = snapshot.activeGameTagForImports.ifBlank { "General Studio" }
+        val activeGroup = snapshot.activeGroupTagForImports.ifBlank { "Core Roster" }
+        val activeChar = exportedSheet.name.ifBlank { "New Original Sprite" }
+
+        val updatedRig = RigMetadata.defaultForSprite(
+            name = exportedSheet.name,
+            width = exportedSheet.frameWidth,
+            height = exportedSheet.frameHeight,
+            frameCount = exportedSheet.frames.size
+        )
+
+        val savedLibEntry = SavedLibraryAsset(
+            id = "lib_scratch_${System.currentTimeMillis()}",
+            title = exportedSheet.name,
+            characterTag = activeChar,
+            gameTag = activeGame,
+            groupTag = activeGroup,
+            type = LibraryAssetType.SPRITE_2D,
+            spriteSheet = exportedSheet,
+            hardwareBadge = snapshot.selectedHardware.shortName,
+            metricsSummary = "${exportedSheet.frameWidth}×${exportedSheet.frameHeight}px • ${exportedSheet.frames.size}f • SCRATCH"
+        )
+
+        val historyEntity = AssetHistoryEntity.fromStudioAssets(
+            title = exportedSheet.name,
+            characterTag = activeChar,
+            assetType = "SPRITE_2D",
+            sourceOrigin = "SCRATCH 2D CANVAS",
+            hardwareTarget = snapshot.selectedHardware.shortName,
+            metricsSummary = "${exportedSheet.frameWidth}×${exportedSheet.frameHeight}px • ${exportedSheet.frames.size} frames",
+            spriteSheet = exportedSheet,
+            gameTag = activeGame,
+            groupTag = activeGroup
+        )
+
+        _uiState.update { state ->
+            val nextHistoryId = (state.roomAssetHistory.maxOfOrNull { it.id } ?: 0L) + 1L
+            state.copy(
+                currentSpriteSheet = exportedSheet,
+                hasImportedSprite = true,
+                activeRigMetadata = updatedRig,
+                savedLibraryAssets = listOf(savedLibEntry) + state.savedLibraryAssets,
+                roomAssetHistory = listOf(historyEntity.copy(id = nextHistoryId)) + state.roomAssetHistory,
+                statusMessage = "Saved brand-new sprite '${exportedSheet.name}' (${exportedSheet.frames.size}f) to Studio, Library & Room History!"
+            )
+        }
+
+        // Persist asynchronously to Room if attached (without duplicating in-memory state)
+        val repo = historyRepository
+        if (repo != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    repo.recordGeneratedAsset(historyEntity)
+                    val dbRows = repo.getAllHistorySnapshot()
+                    if (dbRows.isNotEmpty()) {
+                        _uiState.update { it.copy(roomAssetHistory = dbRows) }
+                    }
+                } catch (e: Exception) {
+                    Log.w("MainViewModel", "Room persistence skipped for scratch sprite: ${e.message}")
+                }
+            }
+        }
+
+        // Stage under active Game -> Group -> Character pool
+        registerAssetAndAutoFuseIfMatched(
+            StagedCharacterAsset(
+                id = "staged_scratch_${System.currentTimeMillis()}",
+                assetTitle = exportedSheet.name,
+                characterName = activeChar,
+                modality = CharacterAssetModality.SPRITESHEET_2D,
+                isUserImported = true,
+                spriteSheet = exportedSheet,
+                gameTag = activeGame,
+                groupTag = activeGroup
+            )
+        )
+    }
+
+    fun updateScratchCreateAssetName(name: String) {
+        _uiState.update { it.copy(scratchCreateAssetName = name) }
+    }
+
+    fun createBrandNewAssetFromScratchWithAi(alsoExtrude3D: Boolean = false) {
+        val snapshot = _uiState.value
+        val subject = snapshot.promptText.trim()
+        if (subject.isBlank()) {
+            _uiState.update {
+                it.copy(
+                    lastScratchAiError = "Enter a subject description before generating a brand-new asset from scratch.",
+                    statusMessage = "Describe your new asset first."
+                )
+            }
+            return
+        }
+
+        val assetName = snapshot.scratchCreateAssetName.trim()
+        val activeGame = snapshot.activeGameTagForImports.ifBlank { "General Studio" }
+        val activeGroup = snapshot.activeGroupTagForImports.ifBlank { "Core Roster" }
+        val activeChar = assetName.ifBlank {
+            subject.split(Regex("\\s+")).take(3).joinToString(" ").ifBlank { "Original Creation" }
+        }
+        val paletteHexes = snapshot.selectedColorWheelHexes.ifEmpty {
+            snapshot.extractedPalette.map { it.hex }
+        }
+        val sharedContextBlock = OmniAiRouter.getContextRegistry().assembleContextBlock(
+            queryHint = subject,
+            activeProjectSummary = buildActiveProjectContextSummary(snapshot)
+        )
+
+        _uiState.update {
+            it.copy(
+                isCreatingFromScratchWithAi = true,
+                lastScratchAiError = null,
+                statusMessage = "Generating brand-new asset from scratch (${snapshot.promptAssetPreset.displayName} • ${snapshot.promptHardwareTier.displayName})..."
+            )
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val result = GeminiAssetForge.createBrandNewAssetFromScratch(
+                    assetName = assetName,
+                    subjectDescription = subject,
+                    tier = snapshot.promptHardwareTier,
+                    preset = snapshot.promptAssetPreset,
+                    includeHumanoidHeroicProportions = snapshot.includeHumanoidHeroicProportions,
+                    paletteHexList = paletteHexes,
+                    gameTag = activeGame,
+                    groupTag = activeGroup,
+                    characterTag = activeChar,
+                    sharedContextBlock = sharedContextBlock,
+                    autoStripChromaKey = snapshot.stripSolidBgOnImport,
+                    alsoExtrude3D = alsoExtrude3D
+                )
+
+                val savedType = if (result.extrudedMeshOrNull != null) {
+                    LibraryAssetType.UNIFIED_PAIR
+                } else {
+                    LibraryAssetType.SPRITE_2D
+                }
+                val savedEntry = SavedLibraryAsset(
+                    id = "lib_ai_scratch_${System.currentTimeMillis()}",
+                    title = result.title,
+                    characterTag = activeChar,
+                    gameTag = activeGame,
+                    groupTag = activeGroup,
+                    type = savedType,
+                    mesh = result.extrudedMeshOrNull,
+                    spriteSheet = result.spriteSheet,
+                    hardwareBadge = snapshot.selectedHardware.shortName,
+                    metricsSummary = "${result.spriteSheet.frameWidth}×${result.spriteSheet.frameHeight}px • ${result.spriteSheet.frames.size}f • ${result.modelUsed}"
+                )
+
+                val updatedRig = RigMetadata.defaultForSprite(
+                    name = result.title,
+                    width = result.spriteSheet.frameWidth,
+                    height = result.spriteSheet.frameHeight,
+                    frameCount = result.spriteSheet.frames.size
+                )
+
+                _uiState.update { state ->
+                    state.copy(
+                        isCreatingFromScratchWithAi = false,
+                        lastScratchAiError = null,
+                        lastScratchAiCreationBitmap = result.rawGeneratedBitmap,
+                        currentSpriteSheet = result.spriteSheet,
+                        currentMesh = result.extrudedMeshOrNull ?: state.currentMesh,
+                        activeRigMetadata = updatedRig,
+                        savedLibraryAssets = listOf(savedEntry) + state.savedLibraryAssets,
+                        statusMessage = "Created '${result.title}' from scratch via ${result.modelUsed} (${result.spriteSheet.frames.size}f, key ${result.chromaKeyHex})!"
+                    )
+                }
+
+                recordAssetInRoomHistory(
+                    title = result.title,
+                    characterTag = activeChar,
+                    assetType = if (result.extrudedMeshOrNull != null) "FUSED_3D_2D" else "SPRITE_2D",
+                    sourceOrigin = "AI SCRATCH CREATION",
+                    hardwareTarget = snapshot.selectedHardware.shortName,
+                    metricsSummary = "${result.spriteSheet.frameWidth}×${result.spriteSheet.frameHeight}px • ${result.spriteSheet.frames.size}f • ${result.modelUsed}",
+                    mesh = result.extrudedMeshOrNull,
+                    spriteSheet = result.spriteSheet,
+                    paletteHexList = paletteHexes,
+                    gameTag = activeGame,
+                    groupTag = activeGroup
+                )
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "From-scratch AI asset creation failed", e)
+                val msg = e.localizedMessage
+                    ?: "AI generation failed. Connect a provider in OmniAiHub or draw offline on the Blank 2D Pixel Canvas."
+                _uiState.update { state ->
+                    state.copy(
+                        isCreatingFromScratchWithAi = false,
+                        lastScratchAiError = msg,
+                        statusMessage = msg
+                    )
+                }
+            }
+        }
     }
 
     override fun onCleared() {

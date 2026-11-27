@@ -25,6 +25,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Brush
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.ViewInAr
@@ -40,14 +42,19 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -55,27 +62,31 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.AppUiState
 import com.example.MainViewModel
 import com.example.R
-import com.example.ai.ArtTheme
-import com.example.ai.AssetTarget
 import com.example.ai.GeminiInputImageSource
 import com.example.ai.GeminiOperationMode
+import com.example.ai.PromptAssetPreset
+import com.example.ai.PromptHardwareTier
 import com.example.model.importer.UniversalAssetImporter
 import com.example.ui.components.AiFileImportReviewCard
 import com.example.ui.components.GeminiEnhancementPanel
 import com.example.ui.components.QuickAddToGalleryBar
 import com.example.ui.components.RoomAssetHistoryPanel
+import com.example.ui.theme.AmberGold
 import com.example.ui.theme.CardBorder
 import com.example.ui.theme.CyanNeon
+import com.example.ui.theme.EmeraldGreen
 import com.example.ui.theme.MagentaNeon
 import com.example.ui.theme.TechMono
 import kotlinx.coroutines.Dispatchers
@@ -87,14 +98,23 @@ fun ForgeStudioScreen(
     uiState: AppUiState,
     viewModel: MainViewModel,
     modifier: Modifier = Modifier,
+    openCreateTabTrigger: Int = 0,
     onNavigateTo3D: (() -> Unit)? = null,
     onNavigateToSprites: (() -> Unit)? = null,
+    onNavigateToScratchCanvas: (() -> Unit)? = null,
     onNavigateToSuite: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var selectedTab by remember { mutableIntStateOf(0) }
     var spriteRes by remember { mutableIntStateOf(32) }
+    var alsoExtrude3D by remember { mutableStateOf(false) }
+
+    LaunchedEffect(openCreateTabTrigger) {
+        if (openCreateTabTrigger > 0) {
+            selectedTab = 0
+        }
+    }
 
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -159,14 +179,14 @@ fun ForgeStudioScreen(
                         .padding(14.dp)
                 ) {
                     Text(
-                        text = "GEMINI AI ASSET SYNTHESIS & VARIANT LAB",
+                        text = "FROM-SCRATCH ASSET CREATOR & AI FORGE",
                         fontFamily = TechMono,
                         fontSize = 11.sp,
                         color = CyanNeon,
                         letterSpacing = 1.sp
                     )
                     Text(
-                        text = "Enhance Imported Images & Generate Playable Variants",
+                        text = "Create Brand-New Sprites, Sheets, Icons & Variants",
                         style = MaterialTheme.typography.titleLarge,
                         color = Color.White
                     )
@@ -195,7 +215,7 @@ fun ForgeStudioScreen(
             }
         }
 
-        // Sub Tabs: 0 = Gemini AI Enhance & Variants, 1 = Prompt Synthesis, 2 = Concept Art Lab
+        // Sub Tabs: 0 = Create New (From Scratch), 1 = Enhance / Variants, 2 = Concept Lab
         TabRow(
             selectedTabIndex = selectedTab,
             containerColor = Color(0xFF0F172A),
@@ -213,25 +233,400 @@ fun ForgeStudioScreen(
             Tab(
                 selected = selectedTab == 0,
                 onClick = { selectedTab = 0 },
-                text = { Text("Gemini Enhance", fontFamily = TechMono, fontSize = 11.sp) },
-                modifier = Modifier.testTag("forge_subtab_gemini_enhance")
+                text = { Text("Create New", fontFamily = TechMono, fontSize = 11.sp) },
+                modifier = Modifier.testTag("forge_subtab_create_new")
             )
             Tab(
                 selected = selectedTab == 1,
                 onClick = { selectedTab = 1 },
-                text = { Text("Prompt Synth", fontFamily = TechMono, fontSize = 11.sp) },
-                modifier = Modifier.testTag("forge_subtab_prompt_synth")
+                text = { Text("Enhance / Variants", fontFamily = TechMono, fontSize = 11.sp) },
+                modifier = Modifier.testTag("forge_subtab_gemini_enhance")
             )
             Tab(
                 selected = selectedTab == 2,
                 onClick = { selectedTab = 2 },
-                text = { Text("Concept Art Lab", fontFamily = TechMono, fontSize = 11.sp) },
+                text = { Text("Concept Lab", fontFamily = TechMono, fontSize = 11.sp) },
                 modifier = Modifier.testTag("forge_subtab_concept_lab")
             )
         }
 
         when (selectedTab) {
             0 -> {
+                // True From-Scratch AI Asset Creator Card (Zero Sample Preload)
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, EmeraldGreen.copy(alpha = 0.5f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AutoAwesome,
+                                contentDescription = null,
+                                tint = EmeraldGreen,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = "TRUE FROM-SCRATCH AI ASSET CREATOR",
+                                fontFamily = TechMono,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = EmeraldGreen
+                            )
+                        }
+
+                        Text(
+                            text = "Generate an original 2D sprite, multi-frame sheet, portrait, or icon directly from your description using your connected AI provider (zero template fallback). Auto-strips chroma-key backgrounds and slices multi-frame sheets cleanly.",
+                            fontSize = 12.sp,
+                            color = Color(0xFF94A3B8)
+                        )
+
+                        // Asset Name
+                        OutlinedTextField(
+                            value = uiState.scratchCreateAssetName,
+                            onValueChange = { viewModel.updateScratchCreateAssetName(it) },
+                            singleLine = true,
+                            label = { Text("Asset Name", fontFamily = TechMono, fontSize = 11.sp) },
+                            placeholder = {
+                                Text(
+                                    "e.g., Emerald Hatchling",
+                                    color = Color(0xFF64748B),
+                                    fontSize = 12.sp
+                                )
+                            },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = EmeraldGreen,
+                                unfocusedBorderColor = CardBorder,
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedLabelColor = EmeraldGreen,
+                                unfocusedLabelColor = Color(0xFF94A3B8)
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("scratch_ai_asset_name_field")
+                        )
+
+                        // Subject Description
+                        OutlinedTextField(
+                            value = uiState.promptText,
+                            onValueChange = { viewModel.updatePromptText(it) },
+                            minLines = 3,
+                            maxLines = 5,
+                            label = { Text("Subject Description", fontFamily = TechMono, fontSize = 11.sp) },
+                            placeholder = {
+                                Text(
+                                    "emerald dragon hatchling with golden horns and glowing cyan Mana Circuits",
+                                    color = Color(0xFF64748B),
+                                    fontSize = 12.sp
+                                )
+                            },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = CyanNeon,
+                                unfocusedBorderColor = CardBorder,
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedLabelColor = CyanNeon,
+                                unfocusedLabelColor = Color(0xFF94A3B8)
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("prompt_text_field")
+                        )
+
+                        // Asset Type Preset Chips
+                        Text(
+                            text = "ASSET TYPE PRESET",
+                            fontFamily = TechMono,
+                            fontSize = 10.sp,
+                            color = Color(0xFF94A3B8)
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            PromptAssetPreset.entries.forEach { preset ->
+                                val shortLabel = when (preset) {
+                                    PromptAssetPreset.SINGLE_SPRITE_1X1 -> "1×1 Sprite"
+                                    PromptAssetPreset.ROW_SHEET_1X4 -> "1×4 Row Sheet"
+                                    PromptAssetPreset.GRID_SHEET_2X4 -> "2×4 Grid Sheet"
+                                    PromptAssetPreset.VN_PORTRAIT -> "VN Portrait"
+                                    PromptAssetPreset.VECTOR_UI_ICON -> "UI Icon"
+                                }
+                                FilterChip(
+                                    selected = uiState.promptAssetPreset == preset,
+                                    onClick = { viewModel.setPromptAssetPreset(preset) },
+                                    label = { Text(shortLabel, fontFamily = TechMono, fontSize = 11.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = CyanNeon,
+                                        selectedLabelColor = Color(0xFF031B26),
+                                        containerColor = Color(0xFF1E293B),
+                                        labelColor = Color.White
+                                    ),
+                                    modifier = Modifier.testTag("scratch_preset_${preset.name.lowercase()}")
+                                )
+                            }
+                        }
+
+                        // Single-Active Hardware Tier Chips
+                        Text(
+                            text = "HARDWARE STYLE TIER (SINGLE-ACTIVE)",
+                            fontFamily = TechMono,
+                            fontSize = 10.sp,
+                            color = Color(0xFF94A3B8)
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            PromptHardwareTier.entries.forEach { tier ->
+                                FilterChip(
+                                    selected = uiState.promptHardwareTier == tier,
+                                    onClick = { viewModel.setPromptHardwareTier(tier) },
+                                    label = { Text(tier.displayName, fontFamily = TechMono, fontSize = 11.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = MagentaNeon,
+                                        selectedLabelColor = Color.White,
+                                        containerColor = Color(0xFF1E293B),
+                                        labelColor = Color.White
+                                    ),
+                                    modifier = Modifier.testTag("scratch_tier_${tier.name.lowercase()}")
+                                )
+                            }
+                        }
+
+                        // Toggles: 6.5-Head Humanoid & Also Extrude 3D Relief
+                        Surface(
+                            color = Color(0xFF0B1220),
+                            shape = RoundedCornerShape(10.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, CardBorder),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "6.5-Head Humanoid Proportions",
+                                        fontFamily = TechMono,
+                                        fontSize = 11.sp,
+                                        color = Color.White
+                                    )
+                                    Switch(
+                                        checked = uiState.includeHumanoidHeroicProportions,
+                                        onCheckedChange = { viewModel.setIncludeHumanoidHeroicProportions(it) },
+                                        colors = SwitchDefaults.colors(
+                                            checkedThumbColor = Color(0xFF031B26),
+                                            checkedTrackColor = CyanNeon
+                                        ),
+                                        modifier = Modifier.testTag("scratch_humanoid_proportions_switch")
+                                    )
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Also Extrude 3D Relief (.OBJ)",
+                                        fontFamily = TechMono,
+                                        fontSize = 11.sp,
+                                        color = Color.White
+                                    )
+                                    Switch(
+                                        checked = alsoExtrude3D,
+                                        onCheckedChange = { alsoExtrude3D = it },
+                                        colors = SwitchDefaults.colors(
+                                            checkedThumbColor = Color(0xFF031B26),
+                                            checkedTrackColor = EmeraldGreen
+                                        ),
+                                        modifier = Modifier.testTag("scratch_also_extrude_3d_switch")
+                                    )
+                                }
+                            }
+                        }
+
+                        // Primary From-Scratch AI Generate CTA
+                        Button(
+                            onClick = { viewModel.createBrandNewAssetFromScratchWithAi(alsoExtrude3D) },
+                            enabled = !uiState.isCreatingFromScratchWithAi,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = EmeraldGreen,
+                                contentColor = Color(0xFF031B12)
+                            ),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp)
+                                .testTag("create_brand_new_ai_asset_btn")
+                        ) {
+                            if (uiState.isCreatingFromScratchWithAi) {
+                                CircularProgressIndicator(
+                                    color = Color(0xFF031B12),
+                                    strokeWidth = 2.5.dp,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    text = "Generating From Scratch...",
+                                    fontFamily = TechMono,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.AutoAwesome,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = "Generate Brand-New Asset From Scratch (AI)",
+                                    fontFamily = TechMono,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        // Actionable Error Card (never silently swaps to sample assets)
+                        val aiErr = uiState.lastScratchAiError
+                        if (!aiErr.isNullOrBlank()) {
+                            Surface(
+                                color = Color(0xFF2B1118),
+                                shape = RoundedCornerShape(10.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFB7185)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("scratch_ai_error_banner")
+                            ) {
+                                Text(
+                                    text = aiErr,
+                                    fontFamily = TechMono,
+                                    fontSize = 11.sp,
+                                    color = Color(0xFFFDA4AF),
+                                    modifier = Modifier.padding(12.dp)
+                                )
+                            }
+                        }
+
+                        // Live Preview of Newly Generated From-Scratch Asset
+                        val createdBmp = uiState.lastScratchAiCreationBitmap
+                        if (createdBmp != null) {
+                            Surface(
+                                color = Color(0xFF090D16),
+                                shape = RoundedCornerShape(12.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, EmeraldGreen.copy(alpha = 0.6f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("scratch_ai_preview_card")
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        text = "LATEST FROM-SCRATCH CREATION (${createdBmp.width}×${createdBmp.height}px)",
+                                        fontFamily = TechMono,
+                                        fontSize = 10.sp,
+                                        color = EmeraldGreen
+                                    )
+                                    Image(
+                                        bitmap = createdBmp.asImageBitmap(),
+                                        contentDescription = "Newly generated from-scratch asset preview",
+                                        filterQuality = FilterQuality.None,
+                                        contentScale = ContentScale.Fit,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(180.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(Color(0xFF111827))
+                                    )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        if (onNavigateToSprites != null) {
+                                            OutlinedButton(
+                                                onClick = onNavigateToSprites,
+                                                border = androidx.compose.foundation.BorderStroke(1.dp, CyanNeon),
+                                                colors = ButtonDefaults.outlinedButtonColors(contentColor = CyanNeon),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("scratch_ai_open_2d_btn")
+                                            ) {
+                                                Icon(Icons.Default.GridView, contentDescription = null, modifier = Modifier.size(15.dp))
+                                                Spacer(Modifier.width(6.dp))
+                                                Text("Inspect in 2D", fontFamily = TechMono, fontSize = 10.sp)
+                                            }
+                                        }
+                                        if (alsoExtrude3D && onNavigateTo3D != null) {
+                                            OutlinedButton(
+                                                onClick = onNavigateTo3D,
+                                                border = androidx.compose.foundation.BorderStroke(1.dp, AmberGold),
+                                                colors = ButtonDefaults.outlinedButtonColors(contentColor = AmberGold),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("scratch_ai_open_3d_btn")
+                                            ) {
+                                                Icon(Icons.Default.ViewInAr, contentDescription = null, modifier = Modifier.size(15.dp))
+                                                Spacer(Modifier.width(6.dp))
+                                                Text("View 3D Relief", fontFamily = TechMono, fontSize = 10.sp)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Offline Direct-Draw Alternative CTA
+                        if (onNavigateToScratchCanvas != null) {
+                            OutlinedButton(
+                                onClick = onNavigateToScratchCanvas,
+                                border = androidx.compose.foundation.BorderStroke(1.dp, CyanNeon),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = CyanNeon),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("forge_open_scratch_canvas_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Brush,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = "Or Draw Offline on Blank 2D Pixel Canvas",
+                                    fontFamily = TechMono,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            1 -> {
                 // Full Gemini Multimodal Asset Enhancement & Variant Generation Lab
                 GeminiEnhancementPanel(
                     uiState = uiState,
@@ -244,203 +639,6 @@ fun ForgeStudioScreen(
                     onNavigateTo3D = onNavigateTo3D,
                     onNavigateToSprites = onNavigateToSprites
                 )
-            }
-
-            1 -> {
-                // Text Prompt Synthesizer + Direct Gemini AI Enhance / Variant Triggers
-                Card(
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, CardBorder),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                        Text(
-                            text = "DESCRIBE YOUR GAME ASSET",
-                            fontFamily = TechMono,
-                            fontSize = 11.sp,
-                            color = Color(0xFF94A3B8)
-                        )
-
-                        OutlinedTextField(
-                            value = uiState.promptText,
-                            onValueChange = { viewModel.updatePromptText(it) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(100.dp)
-                                .testTag("prompt_text_field"),
-                            placeholder = { Text("e.g., Cyberpunk assault mecha with dual energy blades...", color = Color(0xFF64748B)) },
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = CyanNeon,
-                                unfocusedBorderColor = CardBorder,
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White
-                            )
-                        )
-
-                        // Quick Inspirations
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            val ideas = listOf(
-                                "Cyber Mech",
-                                "Sci-Fi Starfighter",
-                                "Dungeon Mimic Chest",
-                                "Aether Crystal",
-                                "Cyber Blade Ninja"
-                            )
-                            ideas.forEach { idea ->
-                                FilterChip(
-                                    selected = false,
-                                    onClick = { viewModel.updatePromptText(idea) },
-                                    label = { Text(idea, fontFamily = TechMono, fontSize = 10.sp) },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        containerColor = Color(0xFF1E293B),
-                                        labelColor = Color.White
-                                    )
-                                )
-                            }
-                        }
-
-                        // Target Type: 3D vs 2D
-                        Text("Output Format", fontFamily = TechMono, fontSize = 11.sp, color = Color(0xFF94A3B8))
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            FilterChip(
-                                selected = uiState.selectedTarget == AssetTarget.MODEL_3D,
-                                onClick = { viewModel.setTarget(AssetTarget.MODEL_3D) },
-                                label = { Text("3D Model (.OBJ)", fontFamily = TechMono, fontSize = 12.sp) },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = CyanNeon,
-                                    selectedLabelColor = Color(0xFF031B26),
-                                    containerColor = Color(0xFF1E293B),
-                                    labelColor = Color.White
-                                ),
-                                modifier = Modifier.testTag("target_model_3d")
-                            )
-                            FilterChip(
-                                selected = uiState.selectedTarget == AssetTarget.SPRITE_SHEET,
-                                onClick = { viewModel.setTarget(AssetTarget.SPRITE_SHEET) },
-                                label = { Text("2D Sprite Sheet", fontFamily = TechMono, fontSize = 12.sp) },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = MagentaNeon,
-                                    selectedLabelColor = Color.White,
-                                    containerColor = Color(0xFF1E293B),
-                                    labelColor = Color.White
-                                ),
-                                modifier = Modifier.testTag("target_spritesheet")
-                            )
-                        }
-
-                        // Theme selector
-                        Text("Art Theme", fontFamily = TechMono, fontSize = 11.sp, color = Color(0xFF94A3B8))
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            ArtTheme.entries.forEach { theme ->
-                                FilterChip(
-                                    selected = uiState.selectedTheme == theme,
-                                    onClick = { viewModel.setTheme(theme) },
-                                    label = { Text(theme.displayName, fontFamily = TechMono, fontSize = 11.sp) },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = Color(0xFF38BDF8),
-                                        selectedLabelColor = Color(0xFF031B26),
-                                        containerColor = Color(0xFF1E293B),
-                                        labelColor = Color.White
-                                    )
-                                )
-                            }
-                        }
-
-                        // Fast Procedural Synthesize Button
-                        Button(
-                            onClick = {
-                                viewModel.generateFromPrompt()
-                                if (uiState.selectedTarget == AssetTarget.MODEL_3D) {
-                                    onNavigateTo3D?.invoke()
-                                } else {
-                                    onNavigateToSprites?.invoke()
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = CyanNeon,
-                                contentColor = Color(0xFF031B26)
-                            ),
-                            shape = RoundedCornerShape(12.dp),
-                            enabled = !uiState.isGenerating,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(50.dp)
-                                .testTag("synthesize_asset_btn")
-                        ) {
-                            if (uiState.isGenerating) {
-                                CircularProgressIndicator(
-                                    color = Color(0xFF031B26),
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Spacer(Modifier.width(10.dp))
-                                Text("Synthesizing Geometry...", fontFamily = TechMono)
-                            } else {
-                                Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(20.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text("Synthesize Base Asset", fontFamily = TechMono, fontSize = 14.sp)
-                            }
-                        }
-
-                        // Direct Gemini AI Enhancement & Variant Generation Buttons from Description
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            OutlinedButton(
-                                onClick = {
-                                    viewModel.runGeminiEnhancementOrVariantGeneration(
-                                        modeOverride = GeminiOperationMode.ENHANCE_ASSET,
-                                        sourceOverride = GeminiInputImageSource.DESCRIPTION_ONLY
-                                    )
-                                    selectedTab = 0
-                                },
-                                enabled = !uiState.isGenerating,
-                                border = androidx.compose.foundation.BorderStroke(1.dp, CyanNeon),
-                                colors = ButtonDefaults.outlinedButtonColors(contentColor = CyanNeon),
-                                shape = RoundedCornerShape(10.dp),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("prompt_gemini_enhance_btn")
-                            ) {
-                                Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(15.dp))
-                                Spacer(Modifier.width(5.dp))
-                                Text("Gemini Enhance", fontFamily = TechMono, fontSize = 10.sp)
-                            }
-
-                            OutlinedButton(
-                                onClick = {
-                                    viewModel.runGeminiEnhancementOrVariantGeneration(
-                                        modeOverride = GeminiOperationMode.GENERATE_VARIANTS,
-                                        sourceOverride = GeminiInputImageSource.DESCRIPTION_ONLY
-                                    )
-                                    selectedTab = 0
-                                },
-                                enabled = !uiState.isGenerating,
-                                border = androidx.compose.foundation.BorderStroke(1.dp, MagentaNeon),
-                                colors = ButtonDefaults.outlinedButtonColors(contentColor = MagentaNeon),
-                                shape = RoundedCornerShape(10.dp),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("prompt_gemini_variants_btn")
-                            ) {
-                                Icon(Icons.Default.Layers, contentDescription = null, modifier = Modifier.size(15.dp))
-                                Spacer(Modifier.width(5.dp))
-                                Text("Gemini Variants", fontFamily = TechMono, fontSize = 10.sp)
-                            }
-                        }
-                    }
-                }
             }
 
             else -> {
@@ -618,7 +816,7 @@ fun ForgeStudioScreen(
                                             modeOverride = GeminiOperationMode.ENHANCE_ASSET,
                                             sourceOverride = GeminiInputImageSource.IMPORTED_CONCEPT_ART
                                         )
-                                        selectedTab = 0
+                                        selectedTab = 1
                                     },
                                     border = androidx.compose.foundation.BorderStroke(1.dp, CyanNeon),
                                     colors = ButtonDefaults.outlinedButtonColors(contentColor = CyanNeon),
@@ -638,7 +836,7 @@ fun ForgeStudioScreen(
                                             modeOverride = GeminiOperationMode.GENERATE_VARIANTS,
                                             sourceOverride = GeminiInputImageSource.IMPORTED_CONCEPT_ART
                                         )
-                                        selectedTab = 0
+                                        selectedTab = 1
                                     },
                                     border = androidx.compose.foundation.BorderStroke(1.dp, MagentaNeon),
                                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MagentaNeon),

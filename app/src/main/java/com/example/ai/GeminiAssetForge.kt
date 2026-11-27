@@ -7,6 +7,9 @@ import android.graphics.Paint
 import android.util.Log
 import com.example.model.concept.ConceptAnalysis
 import com.example.model.concept.ExtractedColor
+import com.example.model.importer.UniversalAssetImporter
+import com.example.model.masterpack.FootAlignedSlicerEngine
+import com.example.model.masterpack.FrameCadenceFps
 import com.example.model.model3d.Face3D
 import com.example.model.model3d.Mesh3D
 import com.example.model.model3d.ProceduralMeshes
@@ -121,6 +124,19 @@ data class GenerationResult(
     val loreDescription: String,
     val mesh: Mesh3D? = null,
     val spriteSheet: SpriteSheetData? = null
+)
+
+/**
+ * Output of a pure from-scratch AI asset creation run (zero reference image, zero fallback sample substitution).
+ */
+data class BrandNewAssetResult(
+    val title: String,
+    val spriteSheet: SpriteSheetData,
+    val extrudedMeshOrNull: Mesh3D?,
+    val rawGeneratedBitmap: Bitmap,
+    val chromaKeyHex: String,
+    val modelUsed: String,
+    val promptUsed: String
 )
 
 object GeminiAssetForge {
@@ -466,6 +482,147 @@ object GeminiAssetForge {
             aiSynthesizedBitmap = generatedBitmap,
             usedImageInput = inputBitmap != null && inputSource != GeminiInputImageSource.DESCRIPTION_ONLY,
             modelNameUsed = resolvedModelLabel
+        )
+    }
+
+    /**
+     * Pure from-scratch AI sprite, animation sheet, portrait, or icon creation.
+     * Always passes `referenceBitmap = null` into [OmniAiRouter.generateImageBitmap], strips solid/chroma-key
+     * backgrounds when [autoStripChromaKey] is enabled, slices into the preset's exact grid, foot-aligns
+     * multi-frame sheets, and never substitutes stock sample meshes if AI is offline.
+     */
+    suspend fun createBrandNewAssetFromScratch(
+        assetName: String,
+        subjectDescription: String,
+        tier: PromptHardwareTier,
+        preset: PromptAssetPreset,
+        includeHumanoidHeroicProportions: Boolean,
+        paletteHexList: List<String>,
+        gameTag: String,
+        groupTag: String,
+        characterTag: String,
+        sharedContextBlock: String = "",
+        autoStripChromaKey: Boolean = true,
+        alsoExtrude3D: Boolean = false
+    ): BrandNewAssetResult {
+        val cleanSubject = subjectDescription.trim()
+        if (cleanSubject.isBlank()) {
+            throw IllegalArgumentException(
+                "Describe the brand-new asset you want to create (e.g. 'emerald dragon hatchling with golden horns')."
+            )
+        }
+
+        val cleanTitle = assetName.trim().ifBlank {
+            cleanSubject.split(Regex("\\s+")).take(3).joinToString(" ")
+                .replaceFirstChar { it.uppercase() }
+                .ifBlank { "New Original Asset" }
+        }
+
+        val promptOutput = PromptStudioEngine.buildPrompts(
+            subjectDescription = cleanSubject,
+            tier = tier,
+            preset = preset,
+            includeHumanoidHeroicProportions = includeHumanoidHeroicProportions,
+            paletteHexList = paletteHexList,
+            gameTag = gameTag,
+            groupTag = groupTag,
+            characterTag = characterTag
+        )
+
+        val omniImage = try {
+            OmniAiRouter.generateImageBitmap(
+                prompt = promptOutput.fullSpec,
+                referenceBitmap = null,
+                sharedContextBlock = sharedContextBlock,
+                firebaseImageDelegate = { combinedPrompt, _ ->
+                    withTimeout(60_000L) {
+                        val response = imageSynthesisModel.generateContent(combinedPrompt)
+                        response.candidates.firstOrNull()
+                            ?.content?.parts?.filterIsInstance<ImagePart>()
+                            ?.firstOrNull()?.image
+                    } ?: throw IllegalStateException("No image was returned by gemini-nano-banana-2.1.")
+                }
+            )
+        } catch (ce: CancellationException) {
+            if (ce is TimeoutCancellationException) {
+                Log.w(TAG, "From-scratch AI generation timed out", ce)
+                throw IllegalStateException(
+                    "AI generation timed out. Connect another image provider in OmniAiHub or draw offline in the Blank 2D Sprite Canvas."
+                )
+            }
+            throw ce
+        } catch (e: Exception) {
+            Log.e(TAG, "From-scratch AI asset creation unavailable", e)
+            val detail = e.localizedMessage?.take(140) ?: "No online image provider responded"
+            throw IllegalStateException(
+                "AI from-scratch generation failed ($detail). Connect an image-capable provider in OmniAiHub or draw offline in the Blank 2D Sprite Canvas.",
+                e
+            )
+        }
+
+        val rawGeneratedBitmap = omniImage.bitmap
+        val resolvedModelLabel = if (omniImage.providerUsed == AiProviderType.FIREBASE_STUDIO) {
+            "gemini-nano-banana-2.1"
+        } else {
+            "${omniImage.providerUsed.name}:${omniImage.modelIdUsed}"
+        }
+
+        val processedBitmap = if (autoStripChromaKey) {
+            UniversalAssetImporter.stripChromaKeyBackground(rawGeneratedBitmap, tolerance = 42)
+        } else {
+            rawGeneratedBitmap
+        }
+
+        val (cols, rows) = when (preset) {
+            PromptAssetPreset.SINGLE_SPRITE_1X1 -> 1 to 1
+            PromptAssetPreset.ROW_SHEET_1X4 -> 4 to 1
+            PromptAssetPreset.GRID_SHEET_2X4 -> 4 to 2
+            PromptAssetPreset.VN_PORTRAIT -> 1 to 1
+            PromptAssetPreset.VECTOR_UI_ICON -> 1 to 1
+        }
+
+        val rawSheet = SpriteSheetData.fromBitmap(
+            bitmap = processedBitmap,
+            name = cleanTitle,
+            columns = cols,
+            rows = rows,
+            sourceKindLabel = "AI SCRATCH CREATION",
+            sourceSizeLabel = "${processedBitmap.width}×${processedBitmap.height}px • ${cols}×${rows}"
+        )
+
+        val finalSheet = if (cols * rows > 1) {
+            val aligned = FootAlignedSlicerEngine.sliceAndFootAlignSheet(
+                sheet = rawSheet,
+                cadenceFps = FrameCadenceFps.FPS_15,
+                paddingPx = 2
+            )
+            aligned.alignedSheet.copy(sourceKindLabel = "AI SCRATCH CREATION")
+        } else {
+            rawSheet
+        }
+
+        val extrudedMesh = if (alsoExtrude3D) {
+            val primaryFrame = finalSheet.frames.firstOrNull() ?: processedBitmap
+            ProceduralMeshes.createVoxelReliefFromBitmap(
+                bitmap = primaryFrame,
+                targetGrid = 28,
+                depthScale = 0.65f,
+                name = "$cleanTitle [3D Relief]",
+                sourceKindLabel = "AI SCRATCH CREATION",
+                sourceSizeLabel = "${primaryFrame.width}×${primaryFrame.height}px"
+            )
+        } else {
+            null
+        }
+
+        return BrandNewAssetResult(
+            title = cleanTitle,
+            spriteSheet = finalSheet,
+            extrudedMeshOrNull = extrudedMesh,
+            rawGeneratedBitmap = rawGeneratedBitmap,
+            chromaKeyHex = promptOutput.chromaKey.hexCode,
+            modelUsed = resolvedModelLabel,
+            promptUsed = promptOutput.fullSpec
         )
     }
 

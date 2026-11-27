@@ -27,11 +27,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AddBox
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.CollectionsBookmark
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeveloperBoard
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Inventory2
@@ -93,6 +97,8 @@ import com.example.ui.screens.SpriteStudioScreen
 import com.example.ui.screens.TextureStudioScreen
 import com.example.ui.theme.CardBorder
 import com.example.ui.theme.CyanNeon
+import com.example.ui.theme.EmeraldGreen
+import com.example.ui.theme.MagentaNeon
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.TechMono
 import kotlinx.coroutines.Dispatchers
@@ -137,6 +143,9 @@ fun PixelForgeApp(viewModel: MainViewModel) {
 
     var selectedTab by remember { mutableIntStateOf(0) }
     var showGalleriesOverlay by remember { mutableStateOf(false) }
+    var showCreateNewDialog by remember { mutableStateOf(false) }
+    var spriteCreateModeTrigger by remember { mutableIntStateOf(0) }
+    var forgeCreateTabTrigger by remember { mutableIntStateOf(0) }
 
     // Surface status notifications
     LaunchedEffect(uiState.statusMessage) {
@@ -174,6 +183,16 @@ fun PixelForgeApp(viewModel: MainViewModel) {
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = { showCreateNewDialog = true },
+                        modifier = Modifier.testTag("top_bar_new_asset_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AddBox,
+                            contentDescription = "Create New Asset From Scratch",
+                            tint = EmeraldGreen
+                        )
+                    }
                     IconButton(
                         onClick = {
                             try {
@@ -300,6 +319,7 @@ fun PixelForgeApp(viewModel: MainViewModel) {
                     1 -> SpriteStudioScreen(
                         uiState = uiState,
                         viewModel = viewModel,
+                        openInCreateModeTrigger = spriteCreateModeTrigger,
                         onNavigateTo3D = { selectedTab = 0 }
                     )
                     2 -> AssetSuiteScreen(
@@ -309,8 +329,19 @@ fun PixelForgeApp(viewModel: MainViewModel) {
                     3 -> ForgeStudioScreen(
                         uiState = uiState,
                         viewModel = viewModel,
+                        openCreateTabTrigger = forgeCreateTabTrigger,
                         onNavigateTo3D = { selectedTab = 0 },
                         onNavigateToSprites = { selectedTab = 1 },
+                        onNavigateToScratchCanvas = {
+                            viewModel.startNewBlankSpriteProject(
+                                uiState.scratchCreateAssetName.ifBlank { "New Original Sprite" },
+                                32,
+                                1
+                            )
+                            spriteCreateModeTrigger++
+                            showGalleriesOverlay = false
+                            selectedTab = 1
+                        },
                         onNavigateToSuite = { selectedTab = 2 }
                     )
                     4 -> TextureStudioScreen(
@@ -386,6 +417,94 @@ fun PixelForgeApp(viewModel: MainViewModel) {
             dismissButton = {
                 TextButton(onClick = { viewModel.dismissExportDialog() }) {
                     Text("Close", color = Color(0xFF94A3B8))
+                }
+            },
+            containerColor = Color(0xFF0F172A)
+        )
+    }
+
+    // Create New Asset From Scratch Launcher Dialog
+    if (showCreateNewDialog) {
+        AlertDialog(
+            onDismissRequest = { showCreateNewDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.AddBox, contentDescription = null, tint = EmeraldGreen, modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Create New Asset From Scratch",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = CyanNeon
+                    )
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Start from a 100% blank canvas, synthesize an original asset with AI, or open the Audio & Cold Vault studio:",
+                        fontSize = 12.sp,
+                        color = Color(0xFF94A3B8)
+                    )
+                    Button(
+                        onClick = {
+                            showCreateNewDialog = false
+                            viewModel.startNewBlankSpriteProject("New Original Sprite", 32, 1)
+                            spriteCreateModeTrigger++
+                            showGalleriesOverlay = false
+                            selectedTab = 1
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldGreen, contentColor = Color(0xFF032014)),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("dialog_new_blank_sprite_btn")
+                    ) {
+                        Icon(Icons.Default.Brush, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Draw Blank 2D Sprite / Animation Sheet", fontFamily = TechMono, fontSize = 11.sp)
+                    }
+                    Button(
+                        onClick = {
+                            showCreateNewDialog = false
+                            forgeCreateTabTrigger++
+                            showGalleriesOverlay = false
+                            selectedTab = 3
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = CyanNeon, contentColor = Color(0xFF031B26)),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("dialog_new_ai_scratch_btn")
+                    ) {
+                        Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Generate Brand-New Asset with AI", fontFamily = TechMono, fontSize = 11.sp)
+                    }
+                    androidx.compose.material3.OutlinedButton(
+                        onClick = {
+                            showCreateNewDialog = false
+                            showGalleriesOverlay = true
+                        },
+                        border = BorderStroke(1.dp, MagentaNeon.copy(alpha = 0.75f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MagentaNeon),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("dialog_open_audio_cold_vault_btn")
+                    ) {
+                        Icon(Icons.Default.GraphicEq, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Open Audio & Cold Vault Studio", fontFamily = TechMono, fontSize = 11.sp)
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showCreateNewDialog = false }) {
+                    Text("Cancel", color = Color(0xFF94A3B8))
                 }
             },
             containerColor = Color(0xFF0F172A)

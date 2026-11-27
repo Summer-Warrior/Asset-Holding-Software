@@ -26,9 +26,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.ViewInAr
@@ -87,6 +90,7 @@ import com.example.ui.components.InspectorMode
 import com.example.ui.components.MasterAssetPipelinePanel
 import com.example.ui.components.QuickAddToGalleryBar
 import com.example.ui.components.RoomAssetHistoryPanel
+import com.example.ui.components.SpriteCanvasEditorPanel
 import com.example.ui.theme.AmberGold
 import com.example.ui.theme.CardBorder
 import com.example.ui.theme.CyanNeon
@@ -102,11 +106,19 @@ fun SpriteStudioScreen(
     uiState: AppUiState,
     viewModel: MainViewModel,
     modifier: Modifier = Modifier,
+    openInCreateModeTrigger: Int = 0,
     onNavigateTo3D: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val currentSheet = uiState.currentSpriteSheet
+
+    var spriteStudioMode by remember { mutableIntStateOf(0) } // 0 = Create / Draw New, 1 = Inspect & Pipeline
+    LaunchedEffect(openInCreateModeTrigger) {
+        if (openInCreateModeTrigger > 0) {
+            spriteStudioMode = 0
+        }
+    }
 
     var isPlaying by remember { mutableStateOf(true) }
     var currentAnimIndex by remember { mutableIntStateOf(0) }
@@ -171,6 +183,88 @@ fun SpriteStudioScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // 2-Option Segmented Mode Switch: Create / Draw New vs Inspect & Pipeline
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Surface(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable { spriteStudioMode = 0 }
+                    .testTag("sprite_mode_create_draw_btn"),
+                shape = RoundedCornerShape(10.dp),
+                color = if (spriteStudioMode == 0) EmeraldGreen.copy(alpha = 0.20f) else Color(0xFF0F172A),
+                border = BorderStroke(1.dp, if (spriteStudioMode == 0) EmeraldGreen else CardBorder)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Brush,
+                        contentDescription = "Create / Draw New",
+                        tint = if (spriteStudioMode == 0) EmeraldGreen else Color(0xFF94A3B8),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "Create / Draw New",
+                        fontFamily = TechMono,
+                        fontSize = 11.sp,
+                        fontWeight = if (spriteStudioMode == 0) FontWeight.Bold else FontWeight.Medium,
+                        color = if (spriteStudioMode == 0) EmeraldGreen else Color(0xFF94A3B8)
+                    )
+                }
+            }
+            Surface(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable { spriteStudioMode = 1 }
+                    .testTag("sprite_mode_inspect_pipeline_btn"),
+                shape = RoundedCornerShape(10.dp),
+                color = if (spriteStudioMode == 1) CyanNeon.copy(alpha = 0.20f) else Color(0xFF0F172A),
+                border = BorderStroke(1.dp, if (spriteStudioMode == 1) CyanNeon else CardBorder)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.GridView,
+                        contentDescription = "Inspect & Pipeline",
+                        tint = if (spriteStudioMode == 1) CyanNeon else Color(0xFF94A3B8),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "Inspect & Pipeline",
+                        fontFamily = TechMono,
+                        fontSize = 11.sp,
+                        fontWeight = if (spriteStudioMode == 1) FontWeight.Bold else FontWeight.Medium,
+                        color = if (spriteStudioMode == 1) CyanNeon else Color(0xFF94A3B8)
+                    )
+                }
+            }
+        }
+
+        if (spriteStudioMode == 0) {
+            SpriteCanvasEditorPanel(
+                uiState = uiState,
+                viewModel = viewModel,
+                onCommittedToStudio = {
+                    currentAnimIndex = 0
+                    currentFrameIndexInAnim = 0
+                    spriteStudioMode = 1
+                }
+            )
+        } else {
         // Preset Chips
         Text(
             text = "SPRITESHEET CATALOG",
@@ -612,6 +706,7 @@ fun SpriteStudioScreen(
                 onSelectReadingLevel = { viewModel.setReadingLevelMode(it) },
                 onCopiedMessage = { viewModel.postStatusMessage(it) }
             )
+        }
         }
     }
 
