@@ -43,6 +43,13 @@ import com.example.data.local.AssetHistoryEntity
 import com.example.data.local.AssetHistoryRepository
 import com.example.data.local.MeshDiskStorage
 import com.example.data.local.PixelForgeDatabase
+import com.example.model.audio.AudioAssetEntry
+import com.example.model.audio.AudioAssetFormat
+import com.example.model.audio.AudioSynthAndDspEngine
+import com.example.model.audio.AudioUsageCategory
+import com.example.model.audio.ProceduralCrySpec
+import com.example.model.audio.ScoreSequenceSpec
+import com.example.model.audio.SoundchipDspProfile
 import com.example.model.concept.ConceptAnalysis
 import com.example.model.concept.ExtractedColor
 import com.example.model.fusion.ModelSpriteFusionEngine
@@ -81,6 +88,16 @@ import com.example.model.suite.SuiteBuildConfig
 import com.example.model.suite.UnifiedAssetSuite
 import com.example.model.texture.ProceduralTextures
 import com.example.model.texture.TexturePreset
+import com.example.model.vault.ColdVaultEndpointConfig
+import com.example.model.vault.EncryptedColdVaultManager
+import com.example.model.vault.HotCacheStats
+import com.example.model.vault.HotPhoneLruCacheManager
+import com.example.model.vault.SixStageAssetImporter
+import com.example.model.vault.SixStageImportResult
+import com.example.model.vault.SkinManifest
+import com.example.model.vault.VaultAssetKind
+import com.example.model.vault.VaultCatalogEntry
+import com.example.model.vault.VaultSettingsAndCatalogStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -89,6 +106,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import kotlin.math.roundToInt
 
 data class AppUiState(
     val currentMesh: Mesh3D = ProceduralMeshes.createSciFiStarfighter(),
@@ -176,7 +195,18 @@ data class AppUiState(
     val selectedColorWheelHexes: List<String> = emptyList(),
     val activeMasterOutputTier: HardwareVisualOutputTier = HardwareVisualOutputTier.ARCADE_32BIT_60FPS,
     val activeRigMetadata: RigMetadata = RigMetadata.defaultForSprite("Cyber Blade Ninja", 48, 48, 12),
-    val lastFootAlignmentSummary: String? = null
+    val lastFootAlignmentSummary: String? = null,
+    // First-Class Audio Asset Vault, 6-Stage Importer, AES-256-GCM Cold Vault & 200 MB LRU Hot Cache
+    val audioVaultEntries: List<AudioAssetEntry> = AudioSynthAndDspEngine.createDefaultAudioPresets(),
+    val selectedAudioEntryId: String? = audioVaultEntries.firstOrNull()?.id,
+    val selectedSoundchipProfile: SoundchipDspProfile = SoundchipDspProfile.SNES_SPC700_BRR,
+    val vaultCatalog: List<VaultCatalogEntry> = emptyList(),
+    val activeSkinManifest: SkinManifest = SkinManifest.DEFAULT_CLEAN_ROOM,
+    val lastSixStageImportResult: SixStageImportResult? = null,
+    val hotCacheStats: HotCacheStats = HotCacheStats(0L, HotPhoneLruCacheManager.DEFAULT_MAX_CACHE_BYTES, 0, 0, 0f),
+    val coldVaultEndpointConfig: ColdVaultEndpointConfig = ColdVaultEndpointConfig(),
+    val isVaultPinConfigured: Boolean = false,
+    val isVaultUnlocked: Boolean = true
 )
 
 class MainViewModel(
@@ -393,9 +423,34 @@ class MainViewModel(
         this.appContext = appCtx
         OmniAiRouter.attachContext(appCtx)
         refreshOmniAiHubState()
+        loadVaultPersistence(appCtx)
         val db = PixelForgeDatabase.getDatabase(appCtx)
         attachHistoryRepository(AssetHistoryRepository(db.assetHistoryDao(), appCtx))
         attachGalleryRepository(AssetGalleryRepository(db.assetGalleryDao(), appCtx))
+    }
+
+    private fun loadVaultPersistence(context: Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val loadedCatalog = VaultSettingsAndCatalogStore.loadCatalog(context)
+                val loadedSkin = VaultSettingsAndCatalogStore.loadActiveSkinManifest(context)
+                val loadedEndpoint = VaultSettingsAndCatalogStore.loadEndpointConfig(context)
+                val pinConfigured = VaultSettingsAndCatalogStore.isPinConfigured(context)
+                val stats = HotPhoneLruCacheManager.computeStats(loadedCatalog)
+                _uiState.update { state ->
+                    state.copy(
+                        vaultCatalog = loadedCatalog,
+                        activeSkinManifest = loadedSkin,
+                        hotCacheStats = stats,
+                        coldVaultEndpointConfig = loadedEndpoint,
+                        isVaultPinConfigured = pinConfigured,
+                        isVaultUnlocked = !pinConfigured
+                    )
+                }
+            } catch (e: Exception) {
+                Log.w("MainViewModel", "Vault persistence load warning: ${e.message}")
+            }
+        }
     }
 
     /**
@@ -3357,6 +3412,440 @@ class MainViewModel(
                 _uiState.update { it.copy(statusMessage = "Master Pack export failed: ${e.message}") }
             }
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    // FIRST-CLASS AUDIO ASSET VAULT, SOUNDCHIP DSP SPLIT, 6-STAGE IMPORTER & AES-256-GCM COLD VAULT
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+
+    fun selectAudioEntry(id: String) {
+        _uiState.update { state ->
+            val exists = state.audioVaultEntries.any { it.id == id }
+            if (!exists) state else state.copy(selectedAudioEntryId = id)
+        }
+    }
+
+    fun selectSoundchipProfile(profile: SoundchipDspProfile) {
+        _uiState.update { state ->
+            state.copy(
+                selectedSoundchipProfile = profile,
+                statusMessage = "Soundchip DSP Split set to ${profile.displayName} (${profile.bitDepth}-bit @ ${profile.targetSampleRateHz} Hz)"
+            )
+        }
+    }
+
+    fun auditionSelectedAudioWithDsp() {
+        val snapshot = _uiState.value
+        val selected = snapshot.audioVaultEntries.firstOrNull { it.id == snapshot.selectedAudioEntryId }
+            ?: snapshot.audioVaultEntries.firstOrNull()
+        if (selected == null) {
+            postStatusMessage("No audio asset selected to audition.")
+            return
+        }
+        val profile = snapshot.selectedSoundchipProfile
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val (rawPcm, sampleRate) = resolvePcmForAudioEntry(selected)
+                if (rawPcm.isEmpty()) {
+                    _uiState.update {
+                        it.copy(statusMessage = "Cannot audition '${selected.title}': no PCM waveform data available.")
+                    }
+                    return@launch
+                }
+                val processedPcm = AudioSynthAndDspEngine.applyHardwareSoundchipDsp(
+                    pcm = rawPcm,
+                    inputRateHz = sampleRate,
+                    profile = profile
+                )
+                AudioSynthAndDspEngine.playPcmSafely(processedPcm, sampleRate)
+                val updatedPeaks = AudioSynthAndDspEngine.computeWaveformPeaks(processedPcm)
+                _uiState.update { state ->
+                    state.copy(
+                        audioVaultEntries = state.audioVaultEntries.map { entry ->
+                            if (entry.id == selected.id) entry.copy(waveformPeaks = updatedPeaks) else entry
+                        },
+                        statusMessage = "Auditioning '${selected.title}' through ${profile.displayName} (${profile.bitDepth}-bit DSP)"
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Audio DSP audition failed", e)
+                _uiState.update { it.copy(statusMessage = "Audio audition failed: ${e.message}") }
+            }
+        }
+    }
+
+    fun exportSelectedAudioSpecJson() {
+        val snapshot = _uiState.value
+        val selected = snapshot.audioVaultEntries.firstOrNull { it.id == snapshot.selectedAudioEntryId }
+            ?: snapshot.audioVaultEntries.firstOrNull()
+        if (selected == null) {
+            postStatusMessage("No audio asset selected for JSON spec export.")
+            return
+        }
+        val fileLabel = when {
+            selected.scoreSpec != null -> "score_seq.json"
+            selected.crySpec != null -> "procedural_cry.json"
+            else -> "audio_cue.json"
+        }
+        _uiState.update {
+            it.copy(
+                exportDialogTitle = "Export Audio Spec ($fileLabel — ${selected.title})",
+                exportDialogText = selected.toExportSpecJson()
+            )
+        }
+    }
+
+    fun importRawBytesThroughSixStageVault(
+        context: Context,
+        rawBytes: ByteArray,
+        fileName: String,
+        slotName: String,
+        sensitive: Boolean
+    ) {
+        val appCtx = context.applicationContext
+        val snapshot = _uiState.value
+        val gameTag = snapshot.activeGameTagForImports.ifBlank { "General Studio" }
+        val groupTag = snapshot.activeGroupTagForImports.ifBlank { "Core Roster" }
+        val charTag = snapshot.activeCharacterTagForImports.ifBlank { "Studio" }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val (result, updatedManifest) = SixStageAssetImporter.importRawBytes(
+                    context = appCtx,
+                    rawBytes = rawBytes,
+                    fileName = fileName,
+                    slotName = slotName,
+                    sensitive = sensitive,
+                    gameTag = gameTag,
+                    groupTag = groupTag,
+                    characterTag = charTag,
+                    existingCatalog = snapshot.vaultCatalog,
+                    activeSkinManifest = snapshot.activeSkinManifest
+                )
+
+                if (!result.success || result.entry == null) {
+                    _uiState.update { state ->
+                        state.copy(
+                            lastSixStageImportResult = result,
+                            statusMessage = result.errorMessage ?: "6-Stage import rejected."
+                        )
+                    }
+                    return@launch
+                }
+
+                val newEntry = result.entry
+                val updatedCatalog = listOf(newEntry) + snapshot.vaultCatalog.filterNot { it.id == newEntry.id }
+                val updatedStats = HotPhoneLruCacheManager.computeStats(updatedCatalog)
+                VaultSettingsAndCatalogStore.saveCatalog(appCtx, updatedCatalog)
+                VaultSettingsAndCatalogStore.saveActiveSkinManifest(appCtx, updatedManifest)
+
+                // If this import is an audio asset, also register it inside the First-Class Audio Vault
+                val importedAudioEntry = if (newEntry.assetKind == VaultAssetKind.AUDIO) {
+                    buildAudioVaultEntryFromVaultImport(newEntry)
+                } else {
+                    null
+                }
+
+                _uiState.update { state ->
+                    val updatedAudioList = if (importedAudioEntry != null) {
+                        listOf(importedAudioEntry) + state.audioVaultEntries.filterNot { it.id == importedAudioEntry.id }
+                    } else {
+                        state.audioVaultEntries
+                    }
+                    state.copy(
+                        vaultCatalog = updatedCatalog,
+                        activeSkinManifest = updatedManifest,
+                        lastSixStageImportResult = result,
+                        hotCacheStats = updatedStats,
+                        audioVaultEntries = updatedAudioList,
+                        selectedAudioEntryId = importedAudioEntry?.id ?: state.selectedAudioEntryId,
+                        statusMessage = if (result.wasDeduplicated) {
+                            "6-Stage Import deduplicated (SHA-256 ${newEntry.sha256Hex.take(10)}…) & bound slot '${newEntry.slotName}'"
+                        } else {
+                            "6-Stage Import passed all 6 stages: stored '${newEntry.title}' & bound slot '${newEntry.slotName}'"
+                        }
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "6-Stage Vault import failed", e)
+                _uiState.update { it.copy(statusMessage = "6-Stage import error: ${e.message}") }
+            }
+        }
+    }
+
+    fun offloadVaultEntryToColdVault(context: Context, entryId: String, passphrase: String) {
+        if (passphrase.isBlank()) {
+            postStatusMessage("Enter a Cold Vault passphrase before encrypting to .vault.enc.")
+            return
+        }
+        val appCtx = context.applicationContext
+        val snapshot = _uiState.value
+        val target = snapshot.vaultCatalog.firstOrNull { it.id == entryId }
+        if (target == null) {
+            postStatusMessage("Vault entry not found.")
+            return
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val offloaded = EncryptedColdVaultManager.offloadEntryToColdVault(appCtx, target, passphrase)
+                val updatedCatalog = _uiState.value.vaultCatalog.map { if (it.id == entryId) offloaded else it }
+                val updatedStats = HotPhoneLruCacheManager.computeStats(updatedCatalog)
+                VaultSettingsAndCatalogStore.saveCatalog(appCtx, updatedCatalog)
+                _uiState.update { state ->
+                    state.copy(
+                        vaultCatalog = updatedCatalog,
+                        hotCacheStats = updatedStats,
+                        statusMessage = "Encrypted '${offloaded.title}' to AES-256-GCM .vault.enc & cleared local hot copy."
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Cold vault offload failed", e)
+                _uiState.update { it.copy(statusMessage = "Cold vault offload failed: ${e.message}") }
+            }
+        }
+    }
+
+    fun hydrateVaultEntryFromColdVault(context: Context, entryId: String, passphrase: String) {
+        if (passphrase.isBlank()) {
+            postStatusMessage("Enter your Cold Vault passphrase to decrypt and hydrate this asset.")
+            return
+        }
+        val appCtx = context.applicationContext
+        val target = _uiState.value.vaultCatalog.firstOrNull { it.id == entryId }
+        if (target == null) {
+            postStatusMessage("Vault entry not found.")
+            return
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val hydrated = EncryptedColdVaultManager.hydrateEntryFromColdVault(appCtx, target, passphrase)
+                val updatedCatalog = _uiState.value.vaultCatalog.map { if (it.id == entryId) hydrated else it }
+                val updatedStats = HotPhoneLruCacheManager.computeStats(updatedCatalog)
+                VaultSettingsAndCatalogStore.saveCatalog(appCtx, updatedCatalog)
+                _uiState.update { state ->
+                    state.copy(
+                        vaultCatalog = updatedCatalog,
+                        hotCacheStats = updatedStats,
+                        statusMessage = "Hydrated '${hydrated.title}' from .vault.enc back to Hot Phone Cache."
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Cold vault hydrate failed", e)
+                _uiState.update { it.copy(statusMessage = "Decrypt/hydrate failed (wrong passphrase or corrupted archive): ${e.message}") }
+            }
+        }
+    }
+
+    fun trimHotPhoneCacheLru(context: Context, passphrase: String) {
+        val appCtx = context.applicationContext
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val currentCatalog = _uiState.value.vaultCatalog
+                val (updatedCatalog, evictedCount) = HotPhoneLruCacheManager.enforceLruBudget(
+                    context = appCtx,
+                    catalog = currentCatalog,
+                    maxCacheBytes = HotPhoneLruCacheManager.DEFAULT_MAX_CACHE_BYTES,
+                    passphrase = passphrase
+                )
+                val updatedStats = HotPhoneLruCacheManager.computeStats(updatedCatalog)
+                VaultSettingsAndCatalogStore.saveCatalog(appCtx, updatedCatalog)
+                _uiState.update { state ->
+                    state.copy(
+                        vaultCatalog = updatedCatalog,
+                        hotCacheStats = updatedStats,
+                        statusMessage = if (evictedCount > 0) {
+                            "LRU Trim offloaded $evictedCount oldest asset(s) to Cold Vault."
+                        } else {
+                            "Hot Phone Cache is within the 200 MB budget (${String.format("%.2f", updatedStats.usedBytes / (1024.0 * 1024.0))} MB used)."
+                        }
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "LRU cache trim failed", e)
+                _uiState.update { it.copy(statusMessage = "LRU cache trim failed: ${e.message}") }
+            }
+        }
+    }
+
+    fun updateColdVaultEndpointConfig(endpointUrl: String, bucketName: String, context: Context? = null) {
+        val cleanUrl = endpointUrl.trim()
+        if (cleanUrl.isNotEmpty() && !cleanUrl.startsWith("https://", ignoreCase = true)) {
+            postStatusMessage("R2 endpoint URL must start with https:// (or leave blank for Local / USB-C Cold Vault).")
+            return
+        }
+        val ctx = context?.applicationContext ?: appContext
+        val updatedConfig = if (ctx != null) {
+            VaultSettingsAndCatalogStore.saveEndpointConfig(ctx, cleanUrl, bucketName)
+        } else {
+            val modeLabel = if (cleanUrl.startsWith("https://", ignoreCase = true) && bucketName.isNotBlank()) {
+                "Cloudflare R2 Configured (${bucketName.trim()})"
+            } else {
+                "Local / USB-C Cold Vault"
+            }
+            ColdVaultEndpointConfig(cleanUrl, bucketName.trim(), modeLabel)
+        }
+        _uiState.update {
+            it.copy(
+                coldVaultEndpointConfig = updatedConfig,
+                statusMessage = "Cold Vault storage mode saved: ${updatedConfig.backupModeLabel}"
+            )
+        }
+    }
+
+    fun configureVaultPin(pin: String, context: Context? = null) {
+        val trimmed = pin.trim()
+        if (trimmed.length < 4) {
+            postStatusMessage("Vault PIN must be at least 4 digits/characters.")
+            return
+        }
+        val ctx = context?.applicationContext ?: appContext
+        val saved = if (ctx != null) VaultSettingsAndCatalogStore.configurePin(ctx, trimmed) else true
+        if (saved) {
+            _uiState.update {
+                it.copy(
+                    isVaultPinConfigured = true,
+                    isVaultUnlocked = true,
+                    statusMessage = "Vault PIN configured with salted SHA-256 verification."
+                )
+            }
+        } else {
+            postStatusMessage("Unable to configure Vault PIN.")
+        }
+    }
+
+    fun unlockVaultWithPin(pin: String, context: Context? = null) {
+        val ctx = context?.applicationContext ?: appContext
+        val verified = if (ctx != null) {
+            VaultSettingsAndCatalogStore.verifyPin(ctx, pin)
+        } else {
+            false
+        }
+        if (verified) {
+            _uiState.update {
+                it.copy(
+                    isVaultUnlocked = true,
+                    statusMessage = "Vault unlocked."
+                )
+            }
+        } else {
+            postStatusMessage("Incorrect Vault PIN.")
+        }
+    }
+
+    fun lockVaultNow() {
+        _uiState.update { state ->
+            if (!state.isVaultPinConfigured) {
+                state.copy(statusMessage = "Set a Vault PIN first before locking the Cold Vault.")
+            } else {
+                state.copy(
+                    isVaultUnlocked = false,
+                    statusMessage = "Vault locked."
+                )
+            }
+        }
+    }
+
+    private fun resolvePcmForAudioEntry(entry: AudioAssetEntry): Pair<ShortArray, Int> {
+        entry.crySpec?.let { spec ->
+            return AudioSynthAndDspEngine.synthesizeProceduralCryPcm(spec, entry.sampleRateHz) to entry.sampleRateHz
+        }
+        entry.scoreSpec?.let { spec ->
+            return AudioSynthAndDspEngine.synthesizeScoreSequencePcm(spec, entry.sampleRateHz) to entry.sampleRateHz
+        }
+        if (entry.filePath.isNotBlank()) {
+            val file = File(entry.filePath)
+            if (file.exists() && entry.format == AudioAssetFormat.WAV_PCM) {
+                val decoded = AudioSynthAndDspEngine.decodeWavBytesToPcm(file.readBytes())
+                if (decoded != null) return decoded
+            }
+        }
+        // Deterministic fallback cry synthesis for non-PCM containers (e.g., MIDI/OGG cue preview)
+        val fallbackCry = ProceduralCrySpec(
+            speciesKey = entry.slotKey,
+            baseFreqHz = 420f,
+            endFreqHz = 660f,
+            durationMs = entry.durationMs.coerceIn(200, 1200),
+            modulationHz = 18f,
+            noiseMix = 0.08f
+        )
+        return AudioSynthAndDspEngine.synthesizeProceduralCryPcm(fallbackCry, 22050) to 22050
+    }
+
+    private fun buildAudioVaultEntryFromVaultImport(entry: VaultCatalogEntry): AudioAssetEntry {
+        val file = File(entry.localFilePath)
+        val ext = entry.extension.lowercase()
+        var format = when (ext) {
+            "wav" -> AudioAssetFormat.WAV_PCM
+            "ogg" -> AudioAssetFormat.OGG_VORBIS
+            "mid", "midi" -> AudioAssetFormat.MIDI_SEQ
+            else -> AudioAssetFormat.AUDIO_CUE_JSON
+        }
+        var category = AudioUsageCategory.SFX_ONE_SHOT
+        var sampleRate = 22050
+        var durationMs = 450
+        var peaks: List<Float> = List(48) { idx -> if (idx % 3 == 0) 0.55f else 0.25f }
+        var crySpec: ProceduralCrySpec? = null
+        var scoreSpec: ScoreSequenceSpec? = null
+
+        try {
+            if (ext == "wav" && file.exists()) {
+                val decoded = AudioSynthAndDspEngine.decodeWavBytesToPcm(file.readBytes())
+                if (decoded != null) {
+                    val (pcm, rate) = decoded
+                    sampleRate = rate
+                    durationMs = ((pcm.size.toDouble() / rate.toDouble()) * 1000.0).roundToInt().coerceAtLeast(1)
+                    peaks = AudioSynthAndDspEngine.computeWaveformPeaks(pcm)
+                    if (durationMs > 3000) category = AudioUsageCategory.BGM_LOOP
+                }
+            } else if (ext == "json" && file.exists()) {
+                val rawJson = file.readText()
+                if (rawJson.contains("\"notes\"") && rawJson.contains("\"bpm\"")) {
+                    val parsedScore = ScoreSequenceSpec.fromJsonString(rawJson)
+                    val pcm = AudioSynthAndDspEngine.synthesizeScoreSequencePcm(parsedScore, 22050)
+                    scoreSpec = parsedScore
+                    format = AudioAssetFormat.SCORE_SEQ_JSON
+                    category = AudioUsageCategory.BGM_LOOP
+                    durationMs = ((pcm.size.toDouble() / 22050.0) * 1000.0).roundToInt().coerceAtLeast(1)
+                    peaks = AudioSynthAndDspEngine.computeWaveformPeaks(pcm)
+                } else if (rawJson.contains("\"baseFreqHz\"")) {
+                    val parsedCry = ProceduralCrySpec.fromJsonString(rawJson)
+                    val pcm = AudioSynthAndDspEngine.synthesizeProceduralCryPcm(parsedCry, 22050)
+                    crySpec = parsedCry
+                    format = AudioAssetFormat.AUDIO_CUE_JSON
+                    category = AudioUsageCategory.PROCEDURAL_CRY
+                    durationMs = parsedCry.durationMs
+                    peaks = AudioSynthAndDspEngine.computeWaveformPeaks(pcm)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("MainViewModel", "Audio metadata extraction fallback for '${entry.title}': ${e.message}")
+        }
+
+        return AudioAssetEntry(
+            id = "audio_${entry.id}",
+            slotKey = entry.slotName,
+            title = entry.title,
+            category = category,
+            format = format,
+            sampleRateHz = sampleRate,
+            durationMs = durationMs,
+            waveformPeaks = peaks,
+            filePath = entry.localFilePath,
+            sha256Hex = entry.sha256Hex,
+            byteSize = entry.byteSize,
+            gameTag = entry.gameTag,
+            groupTag = entry.groupTag,
+            characterTag = entry.characterTag,
+            crySpec = crySpec,
+            scoreSpec = scoreSpec
+        )
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        AudioSynthAndDspEngine.stopActiveTrack()
     }
 
     companion object {

@@ -94,6 +94,7 @@ import com.example.ui.components.AiFileImportReviewCard
 import com.example.ui.components.AssetGalleriesPanel
 import com.example.ui.components.AssetPreviewCard
 import com.example.ui.components.AssetPreviewInspectorCard
+import com.example.ui.components.AudioAndVaultStudioPanel
 import com.example.ui.components.GameGroupCharacterBrowserPanel
 import com.example.ui.components.InspectorMode
 import com.example.ui.components.ModelSpriteFusionPanel
@@ -1541,6 +1542,12 @@ fun AssetSuiteScreen(
             },
             onRunDeepGeminiReview = { viewModel.runDeepGeminiImportFileReview() },
             onKeepAsSingleImage = { viewModel.keepImportedFileAsSingleImage() }
+        )
+
+        // First-Class Audio Vault, 8-Profile Soundchip DSP Split, 6-Stage Importer & AES-256-GCM Cold Vault
+        AudioAndVaultStudioPanel(
+            uiState = uiState,
+            viewModel = viewModel
         )
 
         // 3-Level Game -> Group -> Character Explorer & Quick Presets

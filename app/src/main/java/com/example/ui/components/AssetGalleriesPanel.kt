@@ -207,6 +207,12 @@ fun AssetGalleriesOverlayScreen(
             }
         }
 
+        // First-Class Audio Vault, 8-Profile Soundchip DSP Split, 6-Stage Importer & AES-256-GCM Cold Vault
+        AudioAndVaultStudioPanel(
+            uiState = uiState,
+            viewModel = viewModel
+        )
+
         // 3-Level Game -> Group -> Character Drill-Down Explorer
         GameGroupCharacterBrowserPanel(
             uiState = uiState,

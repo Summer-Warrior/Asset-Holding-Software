@@ -14,6 +14,7 @@ import com.example.model.suite.SuiteBuildConfig
 import com.example.model.suite.SuiteSpriteStrategy
 import com.example.model.texture.ProceduralTextures
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -1830,6 +1831,263 @@ class ExampleRobolectricTest {
       assertEquals(orig.xNorm, parsed.xNorm, 0.001f)
       assertEquals(orig.yNorm, parsed.yNorm, 0.001f)
     }
+  }
+
+  @Test
+  fun `test audio synth soundchip dsp split wav round trip and audio asset resolver`() {
+    // 1. Procedural cry & score sequence synthesis + waveform peaks in 0f..1f
+    val crySpec = com.example.model.audio.ProceduralCrySpec(
+      speciesKey = "volt_shinobi_test",
+      baseFreqHz = 680f,
+      endFreqHz = 1120f,
+      durationMs = 340,
+      modulationHz = 24f,
+      noiseMix = 0.16f
+    )
+    val cryPcm = com.example.model.audio.AudioSynthAndDspEngine.synthesizeProceduralCryPcm(crySpec, 22050)
+    assertTrue("Procedural cry PCM must be non-empty", cryPcm.isNotEmpty())
+    val cryPeaks = com.example.model.audio.AudioSynthAndDspEngine.computeWaveformPeaks(cryPcm, bucketCount = 48)
+    assertEquals(48, cryPeaks.size)
+    assertTrue("All waveform peaks must be normalized to 0f..1f", cryPeaks.all { it in 0f..1f })
+    assertTrue("Cry waveform should have audible energy", cryPeaks.maxOrNull()!! > 0.2f)
+
+    val scoreSpec = com.example.model.audio.ScoreSequenceSpec(
+      title = "Obsidian Synth Test",
+      bpm = 140,
+      notes = listOf(
+        com.example.model.audio.ScoreSequenceNote(0.0f, 0.5f, 64, 0.85f, 0),
+        com.example.model.audio.ScoreSequenceNote(0.5f, 0.5f, 67, 0.90f, 0),
+        com.example.model.audio.ScoreSequenceNote(0.0f, 1.0f, 40, 0.88f, 1),
+        com.example.model.audio.ScoreSequenceNote(0.0f, 1.0f, 76, 0.80f, 2)
+      )
+    )
+    val scorePcm = com.example.model.audio.AudioSynthAndDspEngine.synthesizeScoreSequencePcm(scoreSpec, 22050)
+    assertTrue("Score sequence PCM must be non-empty", scorePcm.isNotEmpty())
+
+    // 2. Run all 8 SoundchipDspProfiles and verify DMG_GB_4CH differs from MSU1_CD_PCM
+    val outputsByProfile = mutableMapOf<com.example.model.audio.SoundchipDspProfile, ShortArray>()
+    com.example.model.audio.SoundchipDspProfile.entries.forEach { profile ->
+      val dspPcm = com.example.model.audio.AudioSynthAndDspEngine.applyHardwareSoundchipDsp(
+        pcm = cryPcm,
+        inputRateHz = 22050,
+        profile = profile
+      )
+      assertTrue("DSP output for ${profile.name} must be non-empty", dspPcm.isNotEmpty())
+      outputsByProfile[profile] = dspPcm
+    }
+    assertEquals(8, outputsByProfile.size)
+    val dmgPcm = outputsByProfile[com.example.model.audio.SoundchipDspProfile.DMG_GB_4CH]!!
+    val msu1Pcm = outputsByProfile[com.example.model.audio.SoundchipDspProfile.MSU1_CD_PCM]!!
+    assertTrue(
+      "Game Boy DMG 4-bit decimated DSP must differ from lossless MSU-1 PCM",
+      !dmgPcm.contentEquals(msu1Pcm)
+    )
+
+    // 3. WAV encode -> decode round-trip preserves sample rate & length
+    val wavBytes = com.example.model.audio.AudioSynthAndDspEngine.encodePcmToWavBytes(cryPcm, 22050)
+    val decoded = com.example.model.audio.AudioSynthAndDspEngine.decodeWavBytesToPcm(wavBytes)
+    assertNotNull("WAV round-trip decode must succeed", decoded)
+    assertEquals(22050, decoded!!.second)
+    assertEquals(cryPcm.size, decoded.first.size)
+
+    // 4. ProceduralCrySpec & ScoreSequenceSpec JSON round-trips
+    val parsedCry = com.example.model.audio.ProceduralCrySpec.fromJsonString(crySpec.toJsonString())
+    assertEquals(crySpec.speciesKey, parsedCry.speciesKey)
+    assertEquals(crySpec.baseFreqHz, parsedCry.baseFreqHz, 0.01f)
+    assertEquals(crySpec.endFreqHz, parsedCry.endFreqHz, 0.01f)
+    assertEquals(crySpec.durationMs, parsedCry.durationMs)
+    assertEquals(crySpec.modulationHz, parsedCry.modulationHz, 0.01f)
+    assertEquals(crySpec.noiseMix, parsedCry.noiseMix, 0.01f)
+
+    val parsedScore = com.example.model.audio.ScoreSequenceSpec.fromJsonString(scoreSpec.toJsonString())
+    assertEquals(scoreSpec.title, parsedScore.title)
+    assertEquals(scoreSpec.bpm, parsedScore.bpm)
+    assertEquals(scoreSpec.notes.size, parsedScore.notes.size)
+    assertEquals(scoreSpec.notes[2].midiNote, parsedScore.notes[2].midiNote)
+
+    // 5. AudioAssetResolver resolves bound slots vs deterministic ProceduralFallbackCry
+    val manifest = com.example.model.vault.SkinManifest(
+      skinId = "obsidian-audio-skin",
+      displayName = "Obsidian Audio Pack",
+      slotBindings = mapOf("bgm_boss" to "vault_store/abc123.wav")
+    )
+    val resolver = com.example.model.audio.AudioAssetResolver(manifest)
+    val bound = resolver.resolve("bgm_boss")
+    assertTrue(bound is com.example.model.audio.ResolvedAudioAsset.BoundAudio)
+    val boundAudio = bound as com.example.model.audio.ResolvedAudioAsset.BoundAudio
+    assertEquals("vault_store/abc123.wav", boundAudio.assetPath)
+    assertEquals(com.example.model.audio.AudioAssetFormat.WAV_PCM, boundAudio.format)
+    assertEquals("obsidian-audio-skin", boundAudio.skinId)
+
+    val fallback = resolver.resolve("missing_species_cry")
+    assertTrue(fallback is com.example.model.audio.ResolvedAudioAsset.ProceduralFallbackCry)
+    val fallbackCry = fallback as com.example.model.audio.ResolvedAudioAsset.ProceduralFallbackCry
+    assertEquals("missing_species_cry", fallbackCry.fallbackCrySpec.speciesKey)
+    assertTrue(fallbackCry.fallbackCrySpec.durationMs >= 200)
+  }
+
+  @Test
+  fun `test six stage importer magic byte validation sha256 dedup sensitive blur and skin resolve`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+
+    // Build a real valid PNG in memory
+    val bmp = android.graphics.Bitmap.createBitmap(32, 32, android.graphics.Bitmap.Config.ARGB_8888)
+    for (y in 0 until 32) {
+      for (x in 0 until 32) {
+        val color = if ((x + y) % 2 == 0) android.graphics.Color.rgb(0, 229, 255) else android.graphics.Color.rgb(255, 42, 133)
+        bmp.setPixel(x, y, color)
+      }
+    }
+    val pngOut = java.io.ByteArrayOutputStream()
+    bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, pngOut)
+    val validPngBytes = pngOut.toByteArray()
+
+    // 1. Valid PNG passes all 6 stages, writes to filesDir/vault_store, and resolves via AssetResolver
+    val (firstResult, updatedManifest) = com.example.model.vault.SixStageAssetImporter.importRawBytes(
+      context = context,
+      rawBytes = validPngBytes,
+      fileName = "kaelen_hero.png",
+      slotName = "hero_idle_sheet",
+      sensitive = false,
+      gameTag = "MPV In-Universe MMO",
+      groupTag = "Protagonists",
+      characterTag = "Kaelen"
+    )
+    assertTrue("Expected valid PNG 6-stage import to succeed: ${firstResult.errorMessage}", firstResult.success)
+    assertEquals(6, firstResult.stages.size)
+    assertTrue("All 6 stages must pass", firstResult.stages.all { it.passed })
+    assertFalse("First import should not be marked deduplicated", firstResult.wasDeduplicated)
+    val entry = firstResult.entry!!
+    val storedFile = java.io.File(entry.localFilePath)
+    assertTrue("Stored asset file must exist on disk", storedFile.exists())
+    assertTrue("Stored asset must reside inside vault_store", storedFile.canonicalPath.contains("vault_store"))
+
+    val resolver = com.example.model.vault.AssetResolver(updatedManifest)
+    val resolved = resolver.resolve("hero_idle_sheet")
+    assertTrue("Named slot must resolve to BoundAsset", resolved is com.example.model.vault.ResolvedAsset.BoundAsset)
+    assertEquals("vault_store/${entry.sha256Hex}.png", (resolved as com.example.model.vault.ResolvedAsset.BoundAsset).assetPath)
+
+    // 2. Re-importing identical bytes triggers SHA-256 deduplication
+    val (dedupResult, _) = com.example.model.vault.SixStageAssetImporter.importRawBytes(
+      context = context,
+      rawBytes = validPngBytes,
+      fileName = "kaelen_hero_copy.png",
+      slotName = "hero_idle_sheet_alt",
+      sensitive = false,
+      existingCatalog = listOf(entry),
+      activeSkinManifest = updatedManifest
+    )
+    assertTrue(dedupResult.success)
+    assertTrue("Identical bytes must trigger SHA-256 deduplication", dedupResult.wasDeduplicated)
+    assertEquals(entry.sha256Hex, dedupResult.entry!!.sha256Hex)
+
+    // 3. Spoofed PNG fails Stage 2 VALIDATE cleanly
+    val (spoofResult, _) = com.example.model.vault.SixStageAssetImporter.importRawBytes(
+      context = context,
+      rawBytes = "NOT_A_PNG".toByteArray(),
+      fileName = "fake.png",
+      slotName = "spoof_slot"
+    )
+    assertFalse("Spoofed PNG must be rejected", spoofResult.success)
+    val validateStage = spoofResult.stages.firstOrNull { it.stage == com.example.model.vault.ImportPipelineStage.VALIDATE }
+    assertNotNull("Stage 2 VALIDATE record must be present", validateStage)
+    assertFalse("Stage 2 VALIDATE must fail on spoofed magic bytes", validateStage!!.passed)
+
+    // 4. Sensitive import creates a privacy-blurred thumbnail cleanly on disk
+    val (sensitiveResult, _) = com.example.model.vault.SixStageAssetImporter.importRawBytes(
+      context = context,
+      rawBytes = validPngBytes,
+      fileName = "private_concept.png",
+      slotName = "private_concept_slot",
+      sensitive = true
+    )
+    assertTrue(sensitiveResult.success)
+    val sensEntry = sensitiveResult.entry!!
+    assertTrue(sensEntry.sensitive)
+    assertTrue("Sensitive thumbnail path must be non-blank", sensEntry.thumbnailPath.isNotBlank())
+    assertTrue("Sensitive thumbnail file must exist on disk", java.io.File(sensEntry.thumbnailPath).exists())
+  }
+
+  @Test
+  fun `test aes256gcm vault enc round trip wrong passphrase rejection and lru hot cache eviction`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val secretPayload = "PixelForge AES-256-GCM Cold Vault Payload • Kaelen Master Pack".toByteArray(Charsets.UTF_8)
+    val passphrase = "ObsidianFoundry!2026"
+
+    // 1. Encrypt -> verify PFVAULT1 header -> decrypt round-trip
+    val encrypted = com.example.model.vault.EncryptedColdVaultManager.encryptBytesToVaultEnc(secretPayload, passphrase)
+    assertEquals("PFVAULT1", String(encrypted, 0, 8, Charsets.US_ASCII))
+    val decrypted = com.example.model.vault.EncryptedColdVaultManager.decryptVaultEncToBytes(encrypted, passphrase)
+    assertTrue("Decrypted bytes must match original plaintext", secretPayload.contentEquals(decrypted))
+
+    // 2. Wrong passphrase throws GeneralSecurityException
+    var wrongPassRejected = false
+    try {
+      com.example.model.vault.EncryptedColdVaultManager.decryptVaultEncToBytes(encrypted, "WrongPassphrase999")
+    } catch (_: java.security.GeneralSecurityException) {
+      wrongPassRejected = true
+    }
+    assertTrue("Wrong passphrase must throw GeneralSecurityException", wrongPassRejected)
+
+    // 3. 1-bit tampered ciphertext throws GeneralSecurityException
+    val tampered = encrypted.copyOf()
+    tampered[tampered.size - 1] = (tampered[tampered.size - 1].toInt() xor 0x01).toByte()
+    var tamperRejected = false
+    try {
+      com.example.model.vault.EncryptedColdVaultManager.decryptVaultEncToBytes(tampered, passphrase)
+    } catch (_: java.security.GeneralSecurityException) {
+      tamperRejected = true
+    }
+    assertTrue("1-bit tampered ciphertext must fail GCM authentication", tamperRejected)
+
+    // 4. LRU Hot Phone Cache eviction offloads oldest entry to .vault.enc & keeps newer entry CACHED_LOCAL
+    val jsonOld = """{"asset":"old_entry","padding":"${"A".repeat(400)}"}""".toByteArray(Charsets.UTF_8)
+    val jsonNew = """{"asset":"new_entry","padding":"${"B".repeat(400)}"}""".toByteArray(Charsets.UTF_8)
+
+    val (oldImport, _) = com.example.model.vault.SixStageAssetImporter.importRawBytes(
+      context = context,
+      rawBytes = jsonOld,
+      fileName = "old_spec.json",
+      slotName = "old_slot"
+    )
+    val (newImport, _) = com.example.model.vault.SixStageAssetImporter.importRawBytes(
+      context = context,
+      rawBytes = jsonNew,
+      fileName = "new_spec.json",
+      slotName = "new_slot"
+    )
+    assertTrue(oldImport.success && newImport.success)
+
+    val oldEntry = oldImport.entry!!.copy(lastAccessedMillis = 1_000L)
+    val newEntry = newImport.entry!!.copy(lastAccessedMillis = 9_000L)
+    val budgetCap = newEntry.byteSize + 32L // Fits 1 file cleanly, forces eviction of the older file
+
+    val (trimmedCatalog, evictedCount) = com.example.model.vault.HotPhoneLruCacheManager.enforceLruBudget(
+      context = context,
+      catalog = listOf(oldEntry, newEntry),
+      maxCacheBytes = budgetCap,
+      passphrase = passphrase
+    )
+    assertEquals(1, evictedCount)
+    val trimmedOld = trimmedCatalog.first { it.id == oldEntry.id }
+    val trimmedNew = trimmedCatalog.first { it.id == newEntry.id }
+
+    assertEquals(com.example.model.vault.VaultCacheState.REMOTE_ONLY, trimmedOld.cacheState)
+    assertTrue("Evicted entry must have .vault.enc archive on disk", java.io.File(trimmedOld.coldVaultPath).exists())
+    assertFalse("Evicted entry hot local file must be deleted", java.io.File(trimmedOld.localFilePath).exists())
+
+    assertEquals(com.example.model.vault.VaultCacheState.CACHED_LOCAL, trimmedNew.cacheState)
+    assertTrue("Newer entry hot local file must remain cached", java.io.File(trimmedNew.localFilePath).exists())
+
+    // 5. Hydrating the evicted entry back from .vault.enc restores the exact file bytes
+    val hydratedOld = com.example.model.vault.EncryptedColdVaultManager.hydrateEntryFromColdVault(
+      context = context,
+      entry = trimmedOld,
+      passphrase = passphrase
+    )
+    assertEquals(com.example.model.vault.VaultCacheState.CACHED_LOCAL, hydratedOld.cacheState)
+    assertTrue(java.io.File(hydratedOld.localFilePath).exists())
+    assertTrue(jsonOld.contentEquals(java.io.File(hydratedOld.localFilePath).readBytes()))
   }
 }
 
