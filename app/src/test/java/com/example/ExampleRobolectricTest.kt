@@ -1625,6 +1625,213 @@ class ExampleRobolectricTest {
     assertEquals(manifest.gameTag, parsed.gameTag)
     assertEquals(manifest.slotBindings, parsed.slotBindings)
   }
+
+  @Test
+  fun `test twenty color wheel boots with zero colors selected and toggles cleanly`() {
+    // 1. Exactly 20 curated colors on the True Fusion Color Wheel
+    assertEquals(20, com.example.model.masterpack.TWENTY_COLOR_WHEEL.size)
+    assertEquals(20, com.example.model.masterpack.TWENTY_COLOR_WHEEL.map { it.hex.uppercase() }.distinct().size)
+
+    // 2. MainViewModel MUST boot with 0 colors selected
+    val vm = MainViewModel()
+    assertTrue(vm.uiState.value.selectedColorWheelHexes.isEmpty())
+
+    // 3. Toggle up to 4 swatches cleanly
+    val w = com.example.model.masterpack.TWENTY_COLOR_WHEEL
+    vm.toggleColorWheelHex(w[0].hex)
+    vm.toggleColorWheelHex(w[4].hex)
+    vm.toggleColorWheelHex(w[9].hex)
+    vm.toggleColorWheelHex(w[12].hex)
+    assertEquals(4, vm.uiState.value.selectedColorWheelHexes.size)
+
+    // Trying to add a 5th respects max-4 cap
+    vm.toggleColorWheelHex(w[17].hex)
+    assertEquals(4, vm.uiState.value.selectedColorWheelHexes.size)
+    assertEquals(false, vm.uiState.value.selectedColorWheelHexes.contains(w[17].hex.uppercase()))
+
+    // 4. Tapping an already-selected hex deselects it cleanly
+    vm.toggleColorWheelHex(w[4].hex)
+    assertEquals(3, vm.uiState.value.selectedColorWheelHexes.size)
+    assertEquals(false, vm.uiState.value.selectedColorWheelHexes.contains(w[4].hex.uppercase()))
+
+    // 5. Reset returns to empty (0 selected)
+    vm.clearColorWheelSelection()
+    assertTrue(vm.uiState.value.selectedColorWheelHexes.isEmpty())
+  }
+
+  @Test
+  fun `test three map decomposition recolor and hardware visual output split`() {
+    val sourceFrame = SampleSpriteSheets.createCyberNinjaSheet().frames.first()
+    val layers = com.example.model.masterpack.ThreeMapRecolorEngine.decomposeSpriteToThreeMaps(sourceFrame)
+
+    // 1. All 4 maps are non-null and match source frame dimensions
+    assertNotNull(layers.colorIdMap)
+    assertNotNull(layers.inkShadowMap)
+    assertNotNull(layers.matEmissiveMap)
+    assertNotNull(layers.depthNormMap)
+    assertEquals(sourceFrame.width, layers.colorIdMap.width)
+    assertEquals(sourceFrame.height, layers.colorIdMap.height)
+    assertEquals(sourceFrame.width, layers.inkShadowMap.width)
+    assertEquals(sourceFrame.height, layers.inkShadowMap.height)
+    assertEquals(sourceFrame.width, layers.matEmissiveMap.width)
+    assertEquals(sourceFrame.height, layers.matEmissiveMap.height)
+    assertEquals(sourceFrame.width, layers.depthNormMap.width)
+    assertEquals(sourceFrame.height, layers.depthNormMap.height)
+    assertTrue(layers.regionBaseColors.isNotEmpty())
+
+    // 2. Compare 0-color baseline vs 2-color wheel swap
+    val baseline = com.example.model.masterpack.ThreeMapRecolorEngine.compositeRecoloredSprite(
+      layers = layers,
+      selectedWheelHexes = emptyList(),
+      tier = com.example.model.masterpack.HardwareVisualOutputTier.ARCADE_32BIT_60FPS
+    )
+    val recolored = com.example.model.masterpack.ThreeMapRecolorEngine.compositeRecoloredSprite(
+      layers = layers,
+      selectedWheelHexes = listOf("#E11D48", "#FACC15"),
+      tier = com.example.model.masterpack.HardwareVisualOutputTier.ARCADE_32BIT_60FPS
+    )
+    assertEquals(sourceFrame.width, recolored.width)
+    assertEquals(sourceFrame.height, recolored.height)
+
+    val count = sourceFrame.width * sourceFrame.height
+    val basePx = IntArray(count)
+    val recPx = IntArray(count)
+    val inkPx = IntArray(count)
+    baseline.getPixels(basePx, 0, sourceFrame.width, 0, 0, sourceFrame.width, sourceFrame.height)
+    recolored.getPixels(recPx, 0, sourceFrame.width, 0, 0, sourceFrame.width, sourceFrame.height)
+    layers.inkShadowMap.getPixels(inkPx, 0, sourceFrame.width, 0, 0, sourceFrame.width, sourceFrame.height)
+
+    var changedPixels = 0
+    var checkedInkPixels = 0
+    for (i in 0 until count) {
+      if (basePx[i] != recPx[i]) changedPixels++
+      if (android.graphics.Color.alpha(inkPx[i]) >= 220) {
+        checkedInkPixels++
+        val r = android.graphics.Color.red(recPx[i])
+        val g = android.graphics.Color.green(recPx[i])
+        val b = android.graphics.Color.blue(recPx[i])
+        assertTrue("Ink pixel must remain dark after recolor (got rgb=$r,$g,$b)", r <= 40 && g <= 40 && b <= 45)
+      }
+    }
+    assertTrue("Recoloring with 2 wheel colors must produce a distinct bitmap", changedPixels > 0)
+    assertTrue("Expected ink pixels to be verified dark", checkedInkPixels > 0)
+
+    // 3. Hardware visual output split compiles all 4 tiers + valid master_pack_manifest.json
+    val ps1 = ConsoleHardwareCatalog.getById("ps1")
+    val rig = com.example.model.masterpack.RigMetadata.defaultForSprite(
+      name = "Cyber Blade Ninja",
+      width = sourceFrame.width,
+      height = sourceFrame.height,
+      frameCount = 12
+    )
+    val splitOutputs = com.example.model.masterpack.FootAlignedSlicerEngine.compileHardwareVisualSplit(
+      layers = layers,
+      selectedWheelHexes = listOf("#E11D48", "#FACC15"),
+      targetHardware = ps1,
+      rigMeta = rig
+    )
+    assertEquals(4, splitOutputs.size)
+    assertEquals(
+      com.example.model.masterpack.HardwareVisualOutputTier.entries.toSet(),
+      splitOutputs.map { it.tier }.toSet()
+    )
+    splitOutputs.forEach { out ->
+      assertEquals(sourceFrame.width, out.bitmap.width)
+      assertEquals(sourceFrame.height, out.bitmap.height)
+      assertTrue(out.paletteColorCount > 0)
+    }
+
+    val manifestJson = com.example.model.masterpack.FootAlignedSlicerEngine.buildMasterPackManifestJson(
+      assetName = "Cyber Blade Ninja",
+      gameTag = "MPV In-Universe MMO",
+      groupTag = "Protagonists",
+      characterTag = "Kaelen",
+      selectedWheelHexes = listOf("#E11D48", "#FACC15"),
+      rigMeta = rig,
+      targetHardware = ps1,
+      outputs = splitOutputs
+    )
+    val parsedManifest = org.json.JSONObject(manifestJson)
+    val visualLayers = parsedManifest.getJSONObject("visualLayers")
+    assertTrue(visualLayers.getString("colorIdMap").endsWith("color_id.png"))
+    assertTrue(visualLayers.getString("inkShadowMap").endsWith("ink_shadow.png"))
+    assertTrue(visualLayers.getString("matEmissiveMap").endsWith("mat_emissive.png"))
+    assertTrue(visualLayers.getString("depthNormMap").endsWith("depth_norm.png"))
+    assertNotNull(parsedManifest.getJSONObject("rig_meta"))
+    assertEquals(4, parsedManifest.getJSONArray("compiledHardwareOutputs").length())
+  }
+
+  @Test
+  fun `test foot aligned slicer eliminates vertical jitter and rig meta json round trip`() {
+    // 1. Construct a 2-frame sprite sheet (2x1, each frame 24x24) with intentional vertical jitter:
+    //    Frame 0 opaque pixels sit at y = 2..10; Frame 1 opaque pixels sit at y = 14..22
+    val atlas = android.graphics.Bitmap.createBitmap(48, 24, android.graphics.Bitmap.Config.ARGB_8888)
+    atlas.eraseColor(android.graphics.Color.TRANSPARENT)
+
+    // Frame 0 (x in 6..15, y in 2..10)
+    for (y in 2..10) {
+      for (x in 6..15) {
+        atlas.setPixel(x, y, android.graphics.Color.rgb(0, 229, 255))
+      }
+    }
+    // Frame 1 (x in 24+10..24+19, y in 14..22)
+    for (y in 14..22) {
+      for (x in 34..43) {
+        atlas.setPixel(x, y, android.graphics.Color.rgb(255, 42, 133))
+      }
+    }
+
+    val jitterySheet = com.example.model.sprite.SpriteSheetData.fromBitmap(
+      bitmap = atlas,
+      name = "Jittery Test Walker",
+      columns = 2,
+      rows = 1
+    )
+
+    val result = com.example.model.masterpack.FootAlignedSlicerEngine.sliceAndFootAlignSheet(
+      sheet = jitterySheet,
+      cadenceFps = com.example.model.masterpack.FrameCadenceFps.FPS_30,
+      paddingPx = 2
+    )
+    assertEquals(2, result.framesAlignedCount)
+    assertEquals(2, result.alignedSheet.frames.size)
+
+    fun bottomMostOpaqueY(bmp: android.graphics.Bitmap): Int {
+      var maxY = -1
+      for (y in 0 until bmp.height) {
+        for (x in 0 until bmp.width) {
+          if (android.graphics.Color.alpha(bmp.getPixel(x, y)) >= 24) {
+            if (y > maxY) maxY = y
+          }
+        }
+      }
+      return maxY
+    }
+
+    val bottom0 = bottomMostOpaqueY(result.alignedSheet.frames[0])
+    val bottom1 = bottomMostOpaqueY(result.alignedSheet.frames[1])
+    assertTrue("Expected opaque pixels in aligned frame 0", bottom0 >= 0)
+    assertEquals("Both foot-aligned frames must share the exact same bottom-most opaque pixel Y", bottom0, bottom1)
+
+    // 2. RigMetadata JSON round-trip preserves cadence, pivot, boxes, and all 7 anchor types
+    val rigJson = result.rigMetadata.toJsonString()
+    val roundTripped = com.example.model.masterpack.RigMetadata.fromJsonString(rigJson)
+    assertEquals(result.rigMetadata.assetName, roundTripped.assetName)
+    assertEquals(com.example.model.masterpack.FrameCadenceFps.FPS_30, roundTripped.cadenceFps)
+    assertEquals(result.rigMetadata.feetPivotYNorm, roundTripped.feetPivotYNorm, 0.001f)
+    assertEquals(result.rigMetadata.hurtbox.xNorm, roundTripped.hurtbox.xNorm, 0.001f)
+    assertEquals(result.rigMetadata.hurtbox.wNorm, roundTripped.hurtbox.wNorm, 0.001f)
+    assertEquals(result.rigMetadata.hitbox.xNorm, roundTripped.hitbox.xNorm, 0.001f)
+    assertEquals(result.rigMetadata.hitbox.hNorm, roundTripped.hitbox.hNorm, 0.001f)
+    assertEquals(7, roundTripped.anchors.size)
+    com.example.model.masterpack.AnchorPointType.entries.forEach { anchorType ->
+      val orig = result.rigMetadata.anchors[anchorType]!!
+      val parsed = roundTripped.anchors[anchorType]!!
+      assertEquals(orig.xNorm, parsed.xNorm, 0.001f)
+      assertEquals(orig.yNorm, parsed.yNorm, 0.001f)
+    }
+  }
 }
+
 
 

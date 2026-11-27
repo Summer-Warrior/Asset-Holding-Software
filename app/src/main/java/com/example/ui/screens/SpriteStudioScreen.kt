@@ -84,6 +84,7 @@ import com.example.ui.components.AssetHardwareReadoutPanel
 import com.example.ui.components.AssetPreviewCard
 import com.example.ui.components.AssetPreviewInspectorCard
 import com.example.ui.components.InspectorMode
+import com.example.ui.components.MasterAssetPipelinePanel
 import com.example.ui.components.QuickAddToGalleryBar
 import com.example.ui.components.RoomAssetHistoryPanel
 import com.example.ui.theme.AmberGold
@@ -517,6 +518,12 @@ fun SpriteStudioScreen(
                 }
             }
         }
+
+        // 6-Layer Visual/Rig Master Pack (20-Color Wheel + 3-Map Recolor + Foot-Aligned Slicer + 4-Tier Split)
+        MasterAssetPipelinePanel(
+            uiState = uiState,
+            viewModel = viewModel
+        )
 
         // Quick Console / Handheld Target Selector Strip
         Text(

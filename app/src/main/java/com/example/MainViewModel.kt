@@ -2,7 +2,11 @@ package com.example
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.AiImportSpriteSheetReviewer
@@ -56,6 +60,13 @@ import com.example.model.importer.SpriteImportResult
 import com.example.model.importer.UniversalAssetImporter
 import com.example.model.library.LibraryAssetType
 import com.example.model.library.SavedLibraryAsset
+import com.example.model.masterpack.AnchorPointType
+import com.example.model.masterpack.FootAlignedSlicerEngine
+import com.example.model.masterpack.FrameCadenceFps
+import com.example.model.masterpack.HardwareVisualOutputTier
+import com.example.model.masterpack.NormalizedAnchor
+import com.example.model.masterpack.RigMetadata
+import com.example.model.masterpack.ThreeMapRecolorEngine
 import com.example.model.model3d.Mesh3D
 import com.example.model.model3d.ObjParser
 import com.example.model.model3d.ProceduralMeshes
@@ -160,7 +171,12 @@ data class AppUiState(
     val lastAssetAuditReport: AssetAuditReport? = null,
     val isAuditingAsset: Boolean = false,
     val auditIntendedForPublicRelease: Boolean = false,
-    val lastContractComplianceReport: ContractComplianceReport? = null
+    val lastContractComplianceReport: ContractComplianceReport? = null,
+    // 6-Layer Visual/Rig Master Pack State (MUST boot with 0 colors selected!)
+    val selectedColorWheelHexes: List<String> = emptyList(),
+    val activeMasterOutputTier: HardwareVisualOutputTier = HardwareVisualOutputTier.ARCADE_32BIT_60FPS,
+    val activeRigMetadata: RigMetadata = RigMetadata.defaultForSprite("Cyber Blade Ninja", 48, 48, 12),
+    val lastFootAlignmentSummary: String? = null
 )
 
 class MainViewModel(
@@ -1144,6 +1160,8 @@ class MainViewModel(
                     originalDimensions = "${mesh.rawVertexCount}v • ${mesh.rawFaceCount}f",
                     formatLabel = mesh.sourceFormat
                 )
+                val activeGame = snapshot.activeGameTagForImports.ifBlank { "General Studio" }
+                val activeGroup = snapshot.activeGroupTagForImports.ifBlank { "Core Roster" }
                 val libEntry = SavedLibraryAsset(
                     id = "lib_mesh_${System.currentTimeMillis()}",
                     title = titledName,
@@ -1153,7 +1171,9 @@ class MainViewModel(
                     hardwareBadge = snapshot.selectedHardware.shortName,
                     metricsSummary = "${mesh.rawVertexCount}v/${mesh.rawFaceCount}f • ${mesh.sourceFormat}",
                     sourceBadge = "FILE",
-                    formatSummary = sizeLabel
+                    formatSummary = sizeLabel,
+                    gameTag = activeGame,
+                    groupTag = activeGroup
                 )
                 _uiState.update {
                     it.copy(
@@ -1171,7 +1191,9 @@ class MainViewModel(
                         characterName = resolvedCharacter,
                         modality = CharacterAssetModality.MESH_3D,
                         isUserImported = true,
-                        mesh = mesh
+                        mesh = mesh,
+                        gameTag = activeGame,
+                        groupTag = activeGroup
                     )
                 )
                 recordAssetInRoomHistory(
@@ -1181,7 +1203,9 @@ class MainViewModel(
                     sourceOrigin = "FILE IMPORT",
                     hardwareTarget = snapshot.selectedHardware.shortName,
                     metricsSummary = "${mesh.vertexCount}v/${mesh.faceCount}f • $sizeLabel",
-                    mesh = mesh
+                    mesh = mesh,
+                    gameTag = activeGame,
+                    groupTag = activeGroup
                 )
             } catch (e: Exception) {
                 _uiState.update { it.copy(statusMessage = "Failed to parse 3D Model: ${e.message}") }
@@ -1210,6 +1234,8 @@ class MainViewModel(
             } else {
                 "$resolvedCharacter - ${result.mesh.name}"
             }
+            val activeGame = snapshot.activeGameTagForImports.ifBlank { "General Studio" }
+            val activeGroup = snapshot.activeGroupTagForImports.ifBlank { "Core Roster" }
             val updatedMesh = result.mesh.copy(name = titledName)
             val libEntry = SavedLibraryAsset(
                 id = "lib_mesh_${System.currentTimeMillis()}",
@@ -1221,7 +1247,9 @@ class MainViewModel(
                 hardwareBadge = snapshot.selectedHardware.shortName,
                 metricsSummary = "${updatedMesh.rawVertexCount}v/${updatedMesh.rawFaceCount}f • ${result.metadata.formatLabel}",
                 sourceBadge = result.metadata.sourceKind.badge,
-                formatSummary = "${result.metadata.formattedSize} • ${result.metadata.readabilityStatus}"
+                formatSummary = "${result.metadata.formattedSize} • ${result.metadata.readabilityStatus}",
+                gameTag = activeGame,
+                groupTag = activeGroup
             )
             _uiState.update { state ->
                 state.copy(
@@ -1242,7 +1270,9 @@ class MainViewModel(
                     modality = CharacterAssetModality.MESH_3D,
                     isUserImported = true,
                     mesh = updatedMesh,
-                    bitmap = result.previewThumbnail
+                    bitmap = result.previewThumbnail,
+                    gameTag = activeGame,
+                    groupTag = activeGroup
                 )
             )
             // If this 3D model came from a photo/image file, review via AI whether a spritesheet was imported as a single picture image!
@@ -1264,7 +1294,9 @@ class MainViewModel(
                 hardwareTarget = snapshot.selectedHardware.shortName,
                 metricsSummary = "${updatedMesh.rawVertexCount}v/${updatedMesh.rawFaceCount}f • ${result.metadata.formatLabel}",
                 mesh = updatedMesh,
-                aiReviewNotes = aiReview?.verdictTitle
+                aiReviewNotes = aiReview?.verdictTitle,
+                gameTag = activeGame,
+                groupTag = activeGroup
             )
         }
     }
@@ -1351,6 +1383,8 @@ class MainViewModel(
                 originalDimensions = "${origW}×${origH}px (${sheet.columns}×${sheet.rows} • ${sheet.frames.size}f)",
                 formatLabel = "${sourceKind.badge} Spritesheet Atlas"
             )
+            val activeGame = snapshot.activeGameTagForImports.ifBlank { "General Studio" }
+            val activeGroup = snapshot.activeGroupTagForImports.ifBlank { "Core Roster" }
             val libEntry = SavedLibraryAsset(
                 id = "lib_sprite_${System.currentTimeMillis()}",
                 title = titledName,
@@ -1360,7 +1394,9 @@ class MainViewModel(
                 hardwareBadge = snapshot.selectedHardware.shortName,
                 metricsSummary = "${sheet.frames.size}f (${sheet.frameWidth}×${sheet.frameHeight}px) • ${origW}×${origH}px",
                 sourceBadge = sourceKind.badge,
-                formatSummary = "${sizeLabel} • ${meta.readabilityStatus}"
+                formatSummary = "${sizeLabel} • ${meta.readabilityStatus}",
+                gameTag = activeGame,
+                groupTag = activeGroup
             )
             _uiState.update {
                 it.copy(
@@ -1378,7 +1414,9 @@ class MainViewModel(
                     characterName = resolvedCharacter,
                     modality = CharacterAssetModality.SPRITESHEET_2D,
                     isUserImported = true,
-                    spriteSheet = sheet
+                    spriteSheet = sheet,
+                    gameTag = activeGame,
+                    groupTag = activeGroup
                 )
             )
             val aiReview = runAiFileImportSpriteSheetCheck(
@@ -1395,7 +1433,9 @@ class MainViewModel(
                 hardwareTarget = snapshot.selectedHardware.shortName,
                 metricsSummary = "${sheet.frames.size}f (${sheet.frameWidth}×${sheet.frameHeight}px) • ${origW}×${origH}px",
                 spriteSheet = sheet,
-                aiReviewNotes = aiReview.verdictTitle
+                aiReviewNotes = aiReview.verdictTitle,
+                gameTag = activeGame,
+                groupTag = activeGroup
             )
         }
     }
@@ -1421,6 +1461,8 @@ class MainViewModel(
             } else {
                 "$resolvedCharacter - ${result.spriteSheet.name}"
             }
+            val activeGame = snapshot.activeGameTagForImports.ifBlank { "General Studio" }
+            val activeGroup = snapshot.activeGroupTagForImports.ifBlank { "Core Roster" }
             val updatedSheet = result.spriteSheet.copy(name = titledName)
             val libEntry = SavedLibraryAsset(
                 id = "lib_sprite_${System.currentTimeMillis()}",
@@ -1431,7 +1473,9 @@ class MainViewModel(
                 hardwareBadge = snapshot.selectedHardware.shortName,
                 metricsSummary = "${updatedSheet.frames.size}f (${updatedSheet.frameWidth}×${updatedSheet.frameHeight}px) • ${result.metadata.formatLabel}",
                 sourceBadge = result.metadata.sourceKind.badge,
-                formatSummary = "${result.metadata.formattedSize} • ${result.metadata.readabilityStatus}"
+                formatSummary = "${result.metadata.formattedSize} • ${result.metadata.readabilityStatus}",
+                gameTag = activeGame,
+                groupTag = activeGroup
             )
             _uiState.update { state ->
                 state.copy(
@@ -1449,7 +1493,9 @@ class MainViewModel(
                     characterName = resolvedCharacter,
                     modality = CharacterAssetModality.SPRITESHEET_2D,
                     isUserImported = true,
-                    spriteSheet = updatedSheet
+                    spriteSheet = updatedSheet,
+                    gameTag = activeGame,
+                    groupTag = activeGroup
                 )
             )
             val aiReview = runAiFileImportSpriteSheetCheck(
@@ -1466,7 +1512,9 @@ class MainViewModel(
                 hardwareTarget = snapshot.selectedHardware.shortName,
                 metricsSummary = "${updatedSheet.frames.size}f (${updatedSheet.frameWidth}×${updatedSheet.frameHeight}px) • ${result.metadata.formatLabel}",
                 spriteSheet = updatedSheet,
-                aiReviewNotes = aiReview.verdictTitle
+                aiReviewNotes = aiReview.verdictTitle,
+                gameTag = activeGame,
+                groupTag = activeGroup
             )
         }
     }
@@ -3083,6 +3131,231 @@ class MainViewModel(
                     "Approved — ephemeral reference cache is already clean (0 temp files)."
                 }
             )
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // 6-Layer Visual/Rig Master Pack Actions (20-Color Wheel, 3-Map Recolor,
+    // Foot-Aligned Slicer & Hardware Visual Output Split)
+    // -------------------------------------------------------------------------
+
+    fun toggleColorWheelHex(hex: String) {
+        val normalized = hex.trim().uppercase()
+        if (normalized.isEmpty()) return
+        _uiState.update { state ->
+            val current = state.selectedColorWheelHexes
+            if (current.any { it.equals(normalized, ignoreCase = true) }) {
+                state.copy(
+                    selectedColorWheelHexes = current.filterNot { it.equals(normalized, ignoreCase = true) }
+                )
+            } else if (current.size >= 4) {
+                state.copy(
+                    statusMessage = "Max 4 Color Wheel regions active — tap a selected swatch to swap."
+                )
+            } else {
+                state.copy(
+                    selectedColorWheelHexes = current + normalized
+                )
+            }
+        }
+    }
+
+    fun clearColorWheelSelection() {
+        _uiState.update {
+            it.copy(
+                selectedColorWheelHexes = emptyList(),
+                statusMessage = "Color Wheel reset to 0 selected (preserving original sprite colors)."
+            )
+        }
+    }
+
+    fun setMasterOutputTier(tier: HardwareVisualOutputTier) {
+        _uiState.update {
+            it.copy(
+                activeMasterOutputTier = tier,
+                statusMessage = "Active Visual Output Tier: ${tier.displayName}"
+            )
+        }
+    }
+
+    fun applyThreeMapRecolorToActiveSprite() {
+        val snapshot = _uiState.value
+        val sheet = snapshot.currentSpriteSheet
+        val selectedHexes = snapshot.selectedColorWheelHexes
+        val tier = snapshot.activeMasterOutputTier
+
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val recoloredFrames = sheet.frames.map { frame ->
+                    val layers = ThreeMapRecolorEngine.decomposeSpriteToThreeMaps(frame)
+                    ThreeMapRecolorEngine.compositeRecoloredSprite(
+                        layers = layers,
+                        selectedWheelHexes = selectedHexes,
+                        tier = tier
+                    )
+                }
+                if (recoloredFrames.isEmpty()) {
+                    _uiState.update { it.copy(statusMessage = "No sprite frames available to recolor.") }
+                    return@launch
+                }
+
+                val cols = sheet.columns.coerceAtLeast(1)
+                val rows = sheet.rows.coerceAtLeast(1)
+                val fw = recoloredFrames.first().width.coerceAtLeast(1)
+                val fh = recoloredFrames.first().height.coerceAtLeast(1)
+                val atlasBmp = Bitmap.createBitmap(fw * cols, fh * rows, Bitmap.Config.ARGB_8888).apply {
+                    setHasAlpha(true)
+                    eraseColor(Color.TRANSPARENT)
+                }
+                val canvas = Canvas(atlasBmp)
+                val paint = Paint().apply {
+                    isFilterBitmap = false
+                    isAntiAlias = false
+                }
+                recoloredFrames.forEachIndexed { idx, frameBmp ->
+                    val col = idx % cols
+                    val row = idx / cols
+                    if (row < rows) {
+                        canvas.drawBitmap(frameBmp, (col * fw).toFloat(), (row * fh).toFloat(), paint)
+                    }
+                }
+
+                val suffix = if (selectedHexes.isEmpty()) tier.displayName else "${tier.displayName} • ${selectedHexes.size}C"
+                val newName = "${sheet.name.substringBefore(" [")} [$suffix]"
+                val updatedSheet = sheet.copy(
+                    id = "recolor_${System.currentTimeMillis()}",
+                    name = newName,
+                    sourceBitmap = atlasBmp,
+                    frameWidth = fw,
+                    frameHeight = fh,
+                    frames = recoloredFrames,
+                    originalWidth = atlasBmp.width,
+                    originalHeight = atlasBmp.height,
+                    sourceKindLabel = "3-MAP RECOLOR"
+                )
+                _uiState.update { state ->
+                    state.copy(
+                        currentSpriteSheet = updatedSheet,
+                        statusMessage = "Baked 3-Map Recolor (${tier.displayName}, ${selectedHexes.size} wheel overrides) across ${recoloredFrames.size} frames!"
+                    )
+                }
+                recordAssetInRoomHistory(
+                    title = newName,
+                    characterTag = snapshot.activeCharacterTagForImports.ifBlank { "Studio" },
+                    assetType = "SPRITE_2D",
+                    sourceOrigin = "3-MAP RECOLOR",
+                    hardwareTarget = snapshot.selectedHardware.shortName,
+                    metricsSummary = "${recoloredFrames.size}f (${fw}×${fh}px) • ${tier.displayName}",
+                    spriteSheet = updatedSheet,
+                    paletteHexList = selectedHexes
+                )
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "3-Map Recolor bake failed", e)
+                _uiState.update { it.copy(statusMessage = "3-Map Recolor failed: ${e.message}") }
+            }
+        }
+    }
+
+    fun footAlignActiveSpriteSheet() {
+        val snapshot = _uiState.value
+        val sheet = snapshot.currentSpriteSheet
+        val cadence = snapshot.activeRigMetadata.cadenceFps
+
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val result = FootAlignedSlicerEngine.sliceAndFootAlignSheet(
+                    sheet = sheet,
+                    cadenceFps = cadence,
+                    paddingPx = 2
+                )
+                _uiState.update { state ->
+                    state.copy(
+                        currentSpriteSheet = result.alignedSheet,
+                        activeRigMetadata = result.rigMetadata,
+                        lastFootAlignmentSummary = result.summary,
+                        statusMessage = result.summary
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Foot-aligned slicing failed", e)
+                _uiState.update { it.copy(statusMessage = "Foot-alignment failed: ${e.message}") }
+            }
+        }
+    }
+
+    fun updateRigCadenceFps(cadence: FrameCadenceFps) {
+        _uiState.update { state ->
+            state.copy(
+                activeRigMetadata = state.activeRigMetadata.copy(cadenceFps = cadence),
+                statusMessage = "Rig cadence set to ${cadence.label}"
+            )
+        }
+    }
+
+    fun updateRigAnchor(type: AnchorPointType, xNorm: Float, yNorm: Float) {
+        val clamped = NormalizedAnchor.of(type, xNorm, yNorm)
+        _uiState.update { state ->
+            val currentRig = state.activeRigMetadata
+            val updatedAnchors = currentRig.anchors.toMutableMap().apply {
+                put(type, clamped)
+            }
+            val updatedFeetPivot = if (type == AnchorPointType.FEET_PIVOT) {
+                clamped.yNorm
+            } else {
+                currentRig.feetPivotYNorm
+            }
+            state.copy(
+                activeRigMetadata = currentRig.copy(
+                    feetPivotYNorm = updatedFeetPivot,
+                    anchors = updatedAnchors
+                )
+            )
+        }
+    }
+
+    fun prepareRigMetaJsonExport() {
+        val json = _uiState.value.activeRigMetadata.toJsonString()
+        _uiState.update {
+            it.copy(
+                exportDialogTitle = "Export Rig Metadata (rig_meta.json)",
+                exportDialogText = json
+            )
+        }
+    }
+
+    fun prepareMasterPackManifestExport() {
+        val snapshot = _uiState.value
+        val sampleFrame = snapshot.currentSpriteSheet.frames.firstOrNull()
+            ?: snapshot.currentSpriteSheet.sourceBitmap
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val layers = ThreeMapRecolorEngine.decomposeSpriteToThreeMaps(sampleFrame)
+                val compiledOutputs = FootAlignedSlicerEngine.compileHardwareVisualSplit(
+                    layers = layers,
+                    selectedWheelHexes = snapshot.selectedColorWheelHexes,
+                    targetHardware = snapshot.selectedHardware,
+                    rigMeta = snapshot.activeRigMetadata
+                )
+                val manifestJson = FootAlignedSlicerEngine.buildMasterPackManifestJson(
+                    assetName = snapshot.currentSpriteSheet.name,
+                    gameTag = snapshot.activeGameTagForImports.ifBlank { "General Studio" },
+                    groupTag = snapshot.activeGroupTagForImports.ifBlank { "Core Roster" },
+                    characterTag = snapshot.activeCharacterTagForImports.ifBlank { "Studio" },
+                    selectedWheelHexes = snapshot.selectedColorWheelHexes,
+                    rigMeta = snapshot.activeRigMetadata,
+                    targetHardware = snapshot.selectedHardware,
+                    outputs = compiledOutputs
+                )
+                _uiState.update {
+                    it.copy(
+                        exportDialogTitle = "Export Master Pack Manifest (master_pack_manifest.json)",
+                        exportDialogText = manifestJson
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Master Pack manifest export failed", e)
+                _uiState.update { it.copy(statusMessage = "Master Pack export failed: ${e.message}") }
+            }
         }
     }
 
