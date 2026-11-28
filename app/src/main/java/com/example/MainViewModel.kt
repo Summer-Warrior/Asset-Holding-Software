@@ -22,6 +22,7 @@ import com.example.ai.AssetAuditReport
 import com.example.ai.AssetTarget
 import com.example.ai.CanonicalAssetAndCodeAuditor
 import com.example.ai.ContractComplianceReport
+import com.example.ai.DefaultAiArtTrainingProfiles
 import com.example.ai.ForgeChatMessage
 import com.example.ai.ForgeChatPromptBuilder
 import com.example.ai.ForgeChatRole
@@ -33,7 +34,13 @@ import com.example.ai.GeminiInputImageSource
 import com.example.ai.GeminiOperationMode
 import com.example.ai.KnowledgeSourceEntry
 import com.example.ai.KnowledgeSourceKind
+import com.example.ai.LocalAiEndpointDiagnostics
+import com.example.ai.LocalAiEndpointPreset
+import com.example.ai.LocalEndpointPingResult
+import com.example.ai.MasterHubWikiCacheState
+import com.example.ai.MasterHubWikiSyncEngine
 import com.example.ai.MultiSourceContextRegistry
+import com.example.ai.OfflineProceduralForge
 import com.example.ai.OmniAiRouter
 import com.example.ai.OmniAiRoutingConfig
 import com.example.ai.OpenRouterPkceHelper
@@ -275,7 +282,21 @@ data class AppUiState(
         )
     ),
     val isForgeChatSending: Boolean = false,
-    val userAiTrainingProfile: UserAiTrainingProfile = UserAiTrainingProfile()
+    val userAiTrainingProfile: UserAiTrainingProfile = UserAiTrainingProfile(),
+    // Adjustable Layer 1 Base, Modular Layer 2 Plug-Ins & Live Master Hub / LoreWeaver Wiki Canon Reader
+    val masterHubWikiState: MasterHubWikiCacheState = MasterHubWikiCacheState(),
+    val isSyncingMasterHubWiki: Boolean = false,
+    val isLayer1BaseCustomized: Boolean = OmniAiRouter.getContextRegistry().isBuiltInLayer1Customized(),
+    val layer1BaseContent: String = OmniAiRouter.getContextRegistry().getBuiltInLayer1Content(),
+    val layer1BaseEnabled: Boolean = OmniAiRouter.getContextRegistry().isBuiltInLayer1Enabled(),
+    val layer2Plugins: List<KnowledgeSourceEntry> = OmniAiRouter.getContextRegistry().listLayer2Plugins(),
+    // Strict Offline-First (0 Tokens), Low-Token Micro Mode & Explicit Model Selection Gate
+    val offlineZeroTokenMode: Boolean = true,
+    val lowTokenMicroPromptMode: Boolean = true,
+    val userExplicitlySelectedAiModel: Boolean = false,
+    val activeExplicitModelId: String = "",
+    val isPingingLocalEndpoint: Boolean = false,
+    val lastLocalEndpointPingResult: LocalEndpointPingResult? = null
 )
 
 class MainViewModel(
@@ -495,7 +516,38 @@ class MainViewModel(
         this.appContext = appCtx
         OmniAiRouter.attachContext(appCtx)
         val loadedTrainingProfile = UserAiTrainingProfileStore.load(appCtx)
-        _uiState.update { it.copy(userAiTrainingProfile = loadedTrainingProfile) }
+        val loadedWikiState = MasterHubWikiSyncEngine.loadCache(appCtx)
+        val registry = OmniAiRouter.getContextRegistry()
+        val persistedProvider = AiProviderType.entries.firstOrNull {
+            it.name == loadedTrainingProfile.explicitChosenProviderName.trim()
+        }
+        val persistedModelId = loadedTrainingProfile.explicitChosenModelId.trim()
+        val hasPersistedExplicitChoice = persistedProvider != null && persistedModelId.isNotBlank()
+        if (hasPersistedExplicitChoice && persistedProvider != null) {
+            OmniAiRouter.updateProviderSettings(
+                provider = persistedProvider,
+                textModelId = persistedModelId,
+                markLocalConnected = if (persistedProvider == AiProviderType.LOCAL_OPENAI_COMPAT) true else null
+            )
+            OmniAiRouter.setActiveProviderForRole(AiTaskRole.TEXT_AND_SPECS, persistedProvider)
+            OmniAiRouter.setActiveProviderForRole(AiTaskRole.VISION_REVIEW, persistedProvider)
+            if (persistedProvider.supportsImageGeneration) {
+                OmniAiRouter.setActiveProviderForRole(AiTaskRole.IMAGE_GENERATION, persistedProvider)
+            }
+        }
+        _uiState.update {
+            it.copy(
+                userAiTrainingProfile = loadedTrainingProfile,
+                masterHubWikiState = loadedWikiState,
+                isLayer1BaseCustomized = registry.isBuiltInLayer1Customized(),
+                layer1BaseContent = registry.getBuiltInLayer1Content(),
+                layer1BaseEnabled = registry.isBuiltInLayer1Enabled(),
+                layer2Plugins = registry.listLayer2Plugins(),
+                userExplicitlySelectedAiModel = hasPersistedExplicitChoice,
+                activeExplicitModelId = if (hasPersistedExplicitChoice) persistedModelId else "",
+                offlineZeroTokenMode = !hasPersistedExplicitChoice
+            )
+        }
         refreshOmniAiHubState()
         loadVaultPersistence(appCtx)
         val db = PixelForgeDatabase.getDatabase(appCtx)
@@ -2871,11 +2923,16 @@ class MainViewModel(
     // -------------------------------------------------------------------------
 
     fun refreshOmniAiHubState() {
+        val registry = OmniAiRouter.getContextRegistry()
         _uiState.update { state ->
             state.copy(
                 aiProviderProfiles = OmniAiRouter.getAllProviderProfiles(),
                 omniAiRouting = OmniAiRouter.getRoutingConfig(),
-                knowledgeSources = OmniAiRouter.getContextRegistry().getSources()
+                knowledgeSources = registry.getSources(),
+                isLayer1BaseCustomized = registry.isBuiltInLayer1Customized(),
+                layer1BaseContent = registry.getBuiltInLayer1Content(),
+                layer1BaseEnabled = registry.isBuiltInLayer1Enabled(),
+                layer2Plugins = registry.listLayer2Plugins()
             )
         }
     }
@@ -2962,15 +3019,25 @@ class MainViewModel(
     }
 
     fun toggleKnowledgeSource(id: String, enabled: Boolean) {
-        val updated = OmniAiRouter.getContextRegistry().toggleSource(id, enabled)
-        _uiState.update { it.copy(knowledgeSources = updated) }
-    }
-
-    fun removeKnowledgeSource(id: String) {
-        val updated = OmniAiRouter.getContextRegistry().removeSource(id)
+        val registry = OmniAiRouter.getContextRegistry()
+        val updated = registry.toggleSource(id, enabled)
         _uiState.update {
             it.copy(
                 knowledgeSources = updated,
+                layer1BaseEnabled = registry.isBuiltInLayer1Enabled(),
+                layer2Plugins = registry.listLayer2Plugins()
+            )
+        }
+    }
+
+    fun removeKnowledgeSource(id: String) {
+        val registry = OmniAiRouter.getContextRegistry()
+        val updated = registry.removeSource(id)
+        _uiState.update {
+            it.copy(
+                knowledgeSources = updated,
+                layer1BaseEnabled = registry.isBuiltInLayer1Enabled(),
+                layer2Plugins = registry.listLayer2Plugins(),
                 statusMessage = "Removed knowledge source from AI Hub"
             )
         }
@@ -3059,11 +3126,25 @@ class MainViewModel(
         queryHint: String = _uiState.value.promptText,
         maxChars: Int = MultiSourceContextRegistry.DEFAULT_MAX_CONTEXT_CHARS
     ): String {
-        return OmniAiRouter.getContextRegistry().assembleContextBlock(
+        val state = _uiState.value
+        val registryBlock = OmniAiRouter.getContextRegistry().buildCombinedContextBlock(
+            maxTotalChars = maxChars,
+            lowTokenMicroMode = state.lowTokenMicroPromptMode,
             queryHint = queryHint,
-            activeProjectSummary = buildActiveProjectContextSummary(),
-            maxChars = maxChars
+            activeProjectSummary = buildActiveProjectContextSummary(state)
         )
+        val wikiBlock = if (state.masterHubWikiState.enabledForAiBase && state.masterHubWikiState.entries.isNotEmpty()) {
+            MasterHubWikiSyncEngine.buildRelevantWikiContextBlock(
+                entries = state.masterHubWikiState.entries,
+                activePromptOrChat = queryHint
+            )
+        } else {
+            ""
+        }
+        val combined = listOf(registryBlock, wikiBlock)
+            .filter { it.isNotBlank() }
+            .joinToString("\n\n")
+        return if (combined.length <= maxChars) combined else combined.substring(0, maxChars)
     }
 
     // -------------------------------------------------------------------------
@@ -4290,6 +4371,56 @@ class MainViewModel(
         _uiState.update { it.copy(scratchCreateAssetName = name) }
     }
 
+    private fun buildOfflineTrainingHints(state: AppUiState, query: String): String {
+        val parts = mutableListOf<String>()
+        val profile = state.userAiTrainingProfile
+        if (profile.styleTriggerToken.isNotBlank()) parts.add(profile.styleTriggerToken.trim())
+        if (profile.customTrainingNotes.isNotBlank()) parts.add(profile.customTrainingNotes.trim().take(500))
+        val activeL2 = OmniAiRouter.getContextRegistry().listLayer2Plugins().filter { it.enabled }
+        activeL2.forEach { plugin ->
+            if (plugin.content.isNotBlank()) {
+                parts.add("${plugin.title}: ${plugin.content.trim().take(320)}")
+            }
+        }
+        val wikiState = state.masterHubWikiState
+        if (wikiState.enabledForAiBase && wikiState.entries.isNotEmpty()) {
+            val wikiBlock = MasterHubWikiSyncEngine.buildRelevantWikiContextBlock(
+                entries = wikiState.entries,
+                activePromptOrChat = query,
+                maxEntries = 3,
+                maxChars = 700
+            )
+            if (wikiBlock.isNotBlank()) parts.add(wikiBlock)
+        }
+        return parts.joinToString("\n")
+    }
+
+    private fun isLocalOfflineConnectionError(e: Throwable): Boolean {
+        var curr: Throwable? = e
+        while (curr != null) {
+            if (curr is java.net.ConnectException ||
+                curr is java.net.SocketTimeoutException ||
+                curr is java.net.UnknownHostException ||
+                curr is java.io.IOException
+            ) {
+                return true
+            }
+            val m = curr.message.orEmpty().lowercase()
+            if (m.contains("failed to connect") ||
+                m.contains("connection refused") ||
+                m.contains("econnrefused") ||
+                m.contains("timed out") ||
+                m.contains("timeout") ||
+                m.contains("unreachable") ||
+                m.contains("no route to host")
+            ) {
+                return true
+            }
+            curr = curr.cause
+        }
+        return false
+    }
+
     fun createBrandNewAssetFromScratchWithAi(alsoExtrude3D: Boolean = false) {
         val snapshot = _uiState.value
         val rawSubject = snapshot.promptText.trim()
@@ -4318,9 +4449,105 @@ class MainViewModel(
         val paletteHexes = snapshot.selectedColorWheelHexes.ifEmpty {
             snapshot.extractedPalette.map { it.hex }
         }
+        val offlineHints = buildOfflineTrainingHints(snapshot, subject)
+        val offlineFrameCount = when (snapshot.promptAssetPreset) {
+            PromptAssetPreset.SINGLE_SPRITE_1X1,
+            PromptAssetPreset.VN_PORTRAIT,
+            PromptAssetPreset.VECTOR_UI_ICON -> 1
+            else -> 4
+        }
+
+        fun applyOffline2DGeneration(customStatusMessage: String? = null) {
+            val (scratchProj, offlineSheet) = OfflineProceduralForge.buildOffline2DSpriteSheet(
+                assetName = activeChar,
+                prompt = subject,
+                sizePx = 32,
+                frameCount = offlineFrameCount,
+                targetFps = targetFps,
+                trainingHints = offlineHints
+            )
+            val extrudedMesh = if (alsoExtrude3D) {
+                OfflineProceduralForge.buildOffline3DModel(
+                    assetName = "$activeChar 3D",
+                    prompt = subject,
+                    trainingHints = offlineHints
+                ).second
+            } else {
+                null
+            }
+            val savedEntry = SavedLibraryAsset(
+                id = "lib_offline_2d_${System.currentTimeMillis()}",
+                title = offlineSheet.name,
+                characterTag = activeChar,
+                gameTag = activeGame,
+                groupTag = activeGroup,
+                type = if (extrudedMesh != null) LibraryAssetType.UNIFIED_PAIR else LibraryAssetType.SPRITE_2D,
+                mesh = extrudedMesh,
+                spriteSheet = offlineSheet,
+                hardwareBadge = snapshot.selectedHardware.shortName,
+                metricsSummary = "${offlineSheet.frameWidth}×${offlineSheet.frameHeight}px • ${offlineSheet.frames.size}f @${targetFps}fps • Offline Procedural (0 Tokens)",
+                sourceBadge = "OFFLINE PROCEDURAL 2D",
+                formatSummary = "0 Tokens • Local Engine"
+            )
+            val updatedRig = RigMetadata.defaultForSprite(
+                name = offlineSheet.name,
+                width = offlineSheet.frameWidth,
+                height = offlineSheet.frameHeight,
+                frameCount = offlineSheet.frames.size
+            ).copy(cadenceFps = AiTrainingDatasetExporter.nearestRigCadence(targetFps))
+
+            val summary = customStatusMessage
+                ?: "Built 2D sprite '${offlineSheet.name}' (${offlineSheet.frames.size}f @ ${targetFps} FPS) offline (0 tokens) — open Sprite Studio to inspect or edit."
+            _uiState.update { state ->
+                state.copy(
+                    isCreatingFromScratchWithAi = false,
+                    lastScratchAiError = null,
+                    scratchSpriteProject = scratchProj,
+                    currentSpriteSheet = offlineSheet,
+                    currentMesh = extrudedMesh ?: state.currentMesh,
+                    activeRigMetadata = updatedRig,
+                    savedLibraryAssets = listOf(savedEntry) + state.savedLibraryAssets,
+                    lastAiBuildSummary = summary,
+                    statusMessage = summary
+                )
+            }
+            recordAssetInRoomHistory(
+                title = offlineSheet.name,
+                characterTag = activeChar,
+                assetType = if (extrudedMesh != null) "FUSED_3D_2D" else "SPRITE_2D",
+                sourceOrigin = "OFFLINE PROCEDURAL 2D",
+                hardwareTarget = snapshot.selectedHardware.shortName,
+                metricsSummary = "${offlineSheet.frameWidth}×${offlineSheet.frameHeight}px • ${offlineSheet.frames.size}f @${targetFps}fps • 0 Tokens",
+                mesh = extrudedMesh,
+                spriteSheet = offlineSheet,
+                paletteHexList = paletteHexes,
+                gameTag = activeGame,
+                groupTag = activeGroup
+            )
+        }
+
+        // Strict Offline-First Gate
+        if (snapshot.offlineZeroTokenMode) {
+            applyOffline2DGeneration()
+            return
+        }
+
+        // Strict Explicit Model Selection Gate for Live AI
+        if (!snapshot.userExplicitlySelectedAiModel || snapshot.activeExplicitModelId.isBlank()) {
+            val gateMsg = "Choose an AI model in AI Hub first to enable Live AI (or keep Offline 0-Token Mode active)."
+            _uiState.update {
+                it.copy(
+                    isCreatingFromScratchWithAi = false,
+                    lastScratchAiError = gateMsg,
+                    statusMessage = gateMsg
+                )
+            }
+            return
+        }
+
         val sharedContextBlock = buildCombinedSharedTrainingContext(
             forChat = false,
-            queryHint = subject,
+            activeQueryText = subject,
             state = snapshot
         )
 
@@ -4328,7 +4555,7 @@ class MainViewModel(
             it.copy(
                 isCreatingFromScratchWithAi = true,
                 lastScratchAiError = null,
-                statusMessage = "Generating brand-new asset from scratch (${snapshot.promptAssetPreset.displayName} • ${targetFps} FPS • ${snapshot.promptHardwareTier.displayName})..."
+                statusMessage = "Generating brand-new asset with ${snapshot.activeExplicitModelId} (${snapshot.promptAssetPreset.displayName} • ${targetFps} FPS)..."
             )
         }
 
@@ -4415,8 +4642,15 @@ class MainViewModel(
                 )
             } catch (e: Exception) {
                 Log.e("MainViewModel", "From-scratch AI asset creation failed", e)
+                val isLocalProvider = OmniAiRouter.getRoutingConfig().activeImageProvider == AiProviderType.LOCAL_OPENAI_COMPAT
+                if (isLocalProvider && isLocalOfflineConnectionError(e)) {
+                    applyOffline2DGeneration(
+                        "Local trained model server offline — generated with Training-Aware Offline (0 Tokens) fallback"
+                    )
+                    return@launch
+                }
                 val msg = e.localizedMessage
-                    ?: "AI generation failed. Connect a provider in OmniAiHub or draw offline on the Blank 2D Pixel Canvas."
+                    ?: "AI generation failed. Connect a provider in OmniAiHub or switch to Offline (0 Tokens) Mode."
                 _uiState.update { state ->
                     state.copy(
                         isCreatingFromScratchWithAi = false,
@@ -5002,7 +5236,7 @@ class MainViewModel(
         if (rawSubject.isBlank()) {
             _uiState.update {
                 it.copy(
-                    lastScratchAiError = "Enter a description before building a brand-new ${target.label} with AI.",
+                    lastScratchAiError = "Enter a description before building a brand-new ${target.label}.",
                     statusMessage = "Describe your ${target.label} first."
                 )
             }
@@ -5022,9 +5256,192 @@ class MainViewModel(
                 .replaceFirstChar { it.uppercase() }
                 .ifBlank { "Original Creation" }
         }
+        val offlineHints = buildOfflineTrainingHints(snapshot, subject)
+
+        fun executeOfflineMultiAssetBuild(statusOverride: String? = null) {
+            when (target) {
+                AiBuildTargetKind.MODEL_3D -> {
+                    val (project, mesh) = OfflineProceduralForge.buildOffline3DModel(
+                        assetName = activeChar,
+                        prompt = subject,
+                        trainingHints = offlineHints
+                    )
+                    val metrics = "${mesh.vertexCount}v/${mesh.faceCount}f • ${project.parts.size} parts • Offline Procedural (0 Tokens)"
+                    val savedEntry = SavedLibraryAsset(
+                        id = "lib_offline3d_${System.currentTimeMillis()}",
+                        title = mesh.name,
+                        characterTag = activeChar,
+                        gameTag = activeGame,
+                        groupTag = activeGroup,
+                        type = LibraryAssetType.MODEL_3D,
+                        mesh = mesh,
+                        hardwareBadge = snapshot.selectedHardware.shortName,
+                        metricsSummary = metrics,
+                        sourceBadge = "OFFLINE PROCEDURAL 3D",
+                        formatSummary = "0 Tokens • Local Engine"
+                    )
+                    val summary = statusOverride
+                        ?: "Built ${project.parts.size}-part editable 3D model '${mesh.name}' (${mesh.vertexCount}v/${mesh.faceCount}f) offline (0 tokens) — open 3D Builder to tweak."
+                    _uiState.update { state ->
+                        state.copy(
+                            isCreatingFromScratchWithAi = false,
+                            lastScratchAiError = null,
+                            scratch3DProject = project,
+                            currentMesh = mesh,
+                            hasImportedMesh = true,
+                            savedLibraryAssets = listOf(savedEntry) + state.savedLibraryAssets,
+                            lastAiBuildSummary = summary,
+                            statusMessage = summary
+                        )
+                    }
+                    recordAssetInRoomHistory(
+                        title = mesh.name,
+                        characterTag = activeChar,
+                        assetType = "MODEL_3D",
+                        sourceOrigin = "OFFLINE PROCEDURAL 3D",
+                        hardwareTarget = snapshot.selectedHardware.shortName,
+                        metricsSummary = metrics,
+                        mesh = mesh,
+                        gameTag = activeGame,
+                        groupTag = activeGroup
+                    )
+                    registerAssetAndAutoFuseIfMatched(
+                        StagedCharacterAsset(
+                            id = "staged_off3d_${System.currentTimeMillis()}",
+                            assetTitle = mesh.name,
+                            characterName = activeChar,
+                            modality = CharacterAssetModality.MESH_3D,
+                            isUserImported = true,
+                            mesh = mesh,
+                            gameTag = activeGame,
+                            groupTag = activeGroup
+                        )
+                    )
+                }
+
+                AiBuildTargetKind.TEXTURE_MATERIAL -> {
+                    val project = OfflineProceduralForge.buildOfflineTexture(
+                        assetName = activeChar,
+                        prompt = subject,
+                        sizePx = 32,
+                        trainingHints = offlineHints
+                    )
+                    val exportBitmap = ScratchTextureEngine.toExportBitmap(project, 128)
+                    val texTitle = project.name
+                    val summary = statusOverride
+                        ?: "Built ${project.sizePx}×${project.sizePx} editable texture '$texTitle' offline (0 tokens) — open Texture Studio to paint or tweak."
+                    _uiState.update { state ->
+                        state.copy(
+                            isCreatingFromScratchWithAi = false,
+                            lastScratchAiError = null,
+                            scratchTextureProject = project,
+                            activeTexture = exportBitmap,
+                            activeTextureName = texTitle,
+                            hasImportedTexture = true,
+                            lastAiBuildSummary = summary,
+                            statusMessage = summary
+                        )
+                    }
+                    registerAssetAndAutoFuseIfMatched(
+                        StagedCharacterAsset(
+                            id = "staged_offtex_${System.currentTimeMillis()}",
+                            assetTitle = texTitle,
+                            characterName = activeChar,
+                            modality = CharacterAssetModality.TEXTURE_UV,
+                            isUserImported = true,
+                            bitmap = exportBitmap,
+                            gameTag = activeGame,
+                            groupTag = activeGroup
+                        )
+                    )
+                }
+
+                AiBuildTargetKind.AUDIO_CRY -> {
+                    val (crySpec, baseEntry) = OfflineProceduralForge.buildOfflineAudioCry(
+                        title = activeChar,
+                        prompt = subject,
+                        trainingHints = offlineHints
+                    )
+                    val entry = baseEntry.copy(
+                        gameTag = activeGame,
+                        groupTag = activeGroup,
+                        characterTag = activeChar
+                    )
+                    val dspProfile = _uiState.value.selectedSoundchipProfile
+                    val rawPcm = AudioSynthAndDspEngine.synthesizeProceduralCryPcm(crySpec, entry.sampleRateHz)
+                    val dspPcm = AudioSynthAndDspEngine.applyHardwareSoundchipDsp(rawPcm, entry.sampleRateHz, dspProfile)
+                    AudioSynthAndDspEngine.playPcmSafely(dspPcm, entry.sampleRateHz)
+
+                    val summary = statusOverride
+                        ?: "Built procedural cry '${entry.title}' (${crySpec.baseFreqHz.roundToInt()}→${crySpec.endFreqHz.roundToInt()} Hz, ${crySpec.durationMs}ms) offline (0 tokens) and auditioned on ${dspProfile.displayName}."
+                    _uiState.update { state ->
+                        state.copy(
+                            isCreatingFromScratchWithAi = false,
+                            lastScratchAiError = null,
+                            audioVaultEntries = listOf(entry) + state.audioVaultEntries,
+                            selectedAudioEntryId = entry.id,
+                            lastAiBuildSummary = summary,
+                            statusMessage = summary
+                        )
+                    }
+                }
+
+                AiBuildTargetKind.AUDIO_CHIPTUNE -> {
+                    val (scoreSpec, baseEntry) = OfflineProceduralForge.buildOfflineChiptune(
+                        title = activeChar,
+                        prompt = subject,
+                        trainingHints = offlineHints
+                    )
+                    val entry = baseEntry.copy(
+                        gameTag = activeGame,
+                        groupTag = activeGroup,
+                        characterTag = activeChar
+                    )
+                    val dspProfile = _uiState.value.selectedSoundchipProfile
+                    val rawPcm = AudioSynthAndDspEngine.synthesizeScoreSequencePcm(scoreSpec, entry.sampleRateHz)
+                    val dspPcm = AudioSynthAndDspEngine.applyHardwareSoundchipDsp(rawPcm, entry.sampleRateHz, dspProfile)
+                    AudioSynthAndDspEngine.playPcmSafely(dspPcm, entry.sampleRateHz)
+
+                    val summary = statusOverride
+                        ?: "Composed 16-step chiptune '${entry.title}' (${scoreSpec.bpm} BPM, ${scoreSpec.notes.size} notes) offline (0 tokens) and auditioned on ${dspProfile.displayName}."
+                    _uiState.update { state ->
+                        state.copy(
+                            isCreatingFromScratchWithAi = false,
+                            lastScratchAiError = null,
+                            audioVaultEntries = listOf(entry) + state.audioVaultEntries,
+                            selectedAudioEntryId = entry.id,
+                            lastAiBuildSummary = summary,
+                            statusMessage = summary
+                        )
+                    }
+                }
+
+                AiBuildTargetKind.SPRITE_2D -> Unit
+            }
+        }
+
+        // Strict Offline-First Gate (zero network, zero tokens)
+        if (snapshot.offlineZeroTokenMode) {
+            executeOfflineMultiAssetBuild()
+            return
+        }
+
+        // Strict Explicit Model Selection Gate for Live AI
+        if (!snapshot.userExplicitlySelectedAiModel || snapshot.activeExplicitModelId.isBlank()) {
+            val gateMsg = "Choose an AI model in AI Hub first to enable Live AI (or keep Offline 0-Token Mode active)."
+            _uiState.update {
+                it.copy(
+                    isCreatingFromScratchWithAi = false,
+                    lastScratchAiError = gateMsg,
+                    statusMessage = gateMsg
+                )
+            }
+            return
+        }
+
         val sharedContextBlock = buildCombinedSharedTrainingContext(
             forChat = false,
-            queryHint = subject,
+            activeQueryText = subject,
             state = snapshot
         )
 
@@ -5032,7 +5449,7 @@ class MainViewModel(
             it.copy(
                 isCreatingFromScratchWithAi = true,
                 lastScratchAiError = null,
-                statusMessage = "Building brand-new ${target.label} from scratch with AI..."
+                statusMessage = "Building brand-new ${target.label} with ${snapshot.activeExplicitModelId}..."
             )
         }
 
@@ -5232,6 +5649,13 @@ class MainViewModel(
                 }
             } catch (e: Exception) {
                 Log.e("MainViewModel", "AI multi-asset build failed for ${target.name}", e)
+                val isLocalProvider = OmniAiRouter.getRoutingConfig().activeTextProvider == AiProviderType.LOCAL_OPENAI_COMPAT
+                if (isLocalProvider && isLocalOfflineConnectionError(e)) {
+                    executeOfflineMultiAssetBuild(
+                        "Local trained model server offline — generated with Training-Aware Offline (0 Tokens) fallback"
+                    )
+                    return@launch
+                }
                 val msg = e.localizedMessage
                     ?: "AI ${target.label} build failed. Check your connected provider in Omni-AI Hub."
                 _uiState.update { state ->
@@ -5260,18 +5684,39 @@ class MainViewModel(
 
     private fun buildCombinedSharedTrainingContext(
         forChat: Boolean,
-        queryHint: String = _uiState.value.promptText,
-        state: AppUiState = _uiState.value
+        activeQueryText: String = "",
+        state: AppUiState = _uiState.value,
+        includeUserTrainingProfile: Boolean = true
     ): String {
-        val registryBlock = OmniAiRouter.getContextRegistry().assembleContextBlock(
-            queryHint = queryHint,
+        val effectiveQuery = activeQueryText.trim().ifBlank { state.promptText.trim() }
+        val microMode = state.lowTokenMicroPromptMode
+        // 1. Prefix-stable Layer 1 Base -> Modular Layer 2 Plug-Ins -> User Sources
+        val registryBlock = OmniAiRouter.getContextRegistry().buildCombinedContextBlock(
+            maxTotalChars = if (microMode) 1_400 else MultiSourceContextRegistry.DEFAULT_MAX_CONTEXT_CHARS,
+            lowTokenMicroMode = microMode,
+            queryHint = effectiveQuery,
             activeProjectSummary = buildActiveProjectContextSummary(state)
         ).trim()
+
+        // 2. Unified User Training Profile (when enabled for the active mode)
         val profile = state.userAiTrainingProfile
-        val trainingEnabled = if (forChat) profile.applyToChatStudio else profile.applyToFormBuilder
+        val trainingEnabled = includeUserTrainingProfile && if (forChat) profile.applyToChatStudio else profile.applyToFormBuilder
         val trainingBlock = if (trainingEnabled) profile.buildUnifiedTrainingContextBlock() else ""
 
-        return listOf(trainingBlock, registryBlock)
+        // 3. Prompt-Aware Relevant Master Hub / LoreWeaver Wiki Canon Details
+        val wikiState = state.masterHubWikiState
+        val wikiBlock = if (wikiState.enabledForAiBase && wikiState.entries.isNotEmpty()) {
+            MasterHubWikiSyncEngine.buildRelevantWikiContextBlock(
+                entries = wikiState.entries,
+                activePromptOrChat = effectiveQuery,
+                maxEntries = if (microMode) 2 else 5,
+                maxChars = if (microMode) 600 else 2_400
+            )
+        } else {
+            ""
+        }
+
+        return listOf(registryBlock, trainingBlock, wikiBlock)
             .filter { it.isNotBlank() }
             .joinToString("\n\n")
     }
@@ -5303,6 +5748,45 @@ class MainViewModel(
             text = cleanText
         )
         val historyBeforeSend = snapshot.forgeChatMessages
+        val offlineHints = buildOfflineTrainingHints(snapshot, cleanText)
+
+        // Strict Offline-First Zero-Token Director Chat
+        if (snapshot.offlineZeroTokenMode) {
+            val offlineReply = OfflineProceduralForge.buildOfflineDirectorChatReply(
+                userMessage = cleanText,
+                targetFps = snapshot.targetAssetFps,
+                relevantWikiContext = offlineHints
+            )
+            _uiState.update { state ->
+                state.copy(
+                    forgeChatMessages = state.forgeChatMessages + userMessage + offlineReply,
+                    isForgeChatSending = false
+                )
+            }
+            return
+        }
+
+        // Strict Explicit Model Selection Gate for Live AI Chat
+        if (!snapshot.userExplicitlySelectedAiModel || snapshot.activeExplicitModelId.isBlank()) {
+            val gateMsg = "Choose an AI model in AI Hub first to enable Live AI (or switch to Offline 0-Token Mode)."
+            val gateReply = ForgeChatMessage(
+                id = "chat_gate_${UUID.randomUUID().toString().take(8)}",
+                role = ForgeChatRole.ASSISTANT,
+                text = gateMsg,
+                providerUsed = "Model Gate",
+                extractedBuildPrompt = cleanText,
+                suggestedBuildTarget = snapshot.selectedAiBuildTarget
+            )
+            _uiState.update { state ->
+                state.copy(
+                    forgeChatMessages = state.forgeChatMessages + userMessage + gateReply,
+                    isForgeChatSending = false,
+                    statusMessage = gateMsg
+                )
+            }
+            return
+        }
+
         _uiState.update { state ->
             state.copy(
                 forgeChatMessages = state.forgeChatMessages + userMessage,
@@ -5310,16 +5794,18 @@ class MainViewModel(
             )
         }
 
-        val sharedRegistryBlock = OmniAiRouter.getContextRegistry().assembleContextBlock(
-            queryHint = cleanText,
-            activeProjectSummary = buildActiveProjectContextSummary(snapshot)
+        val sharedContextWithLayer1AndWiki = buildCombinedSharedTrainingContext(
+            forChat = true,
+            activeQueryText = cleanText,
+            state = snapshot,
+            includeUserTrainingProfile = false
         )
         val conversationPrompt = ForgeChatPromptBuilder.buildConversationPrompt(
             history = historyBeforeSend,
             userMessage = cleanText,
             targetFps = snapshot.targetAssetFps,
             trainingProfile = snapshot.userAiTrainingProfile,
-            sharedContextBlock = sharedRegistryBlock
+            sharedContextBlock = sharedContextWithLayer1AndWiki
         )
 
         viewModelScope.launch(Dispatchers.IO) {
@@ -5369,6 +5855,22 @@ class MainViewModel(
                 }
             } catch (e: Exception) {
                 Log.e("MainViewModel", "Forge AI chat director request failed", e)
+                val isLocalProvider = OmniAiRouter.getRoutingConfig().activeTextProvider == AiProviderType.LOCAL_OPENAI_COMPAT
+                if (isLocalProvider && isLocalOfflineConnectionError(e)) {
+                    val offlineReply = OfflineProceduralForge.buildOfflineDirectorChatReply(
+                        userMessage = cleanText,
+                        targetFps = snapshot.targetAssetFps,
+                        relevantWikiContext = offlineHints
+                    )
+                    _uiState.update { state ->
+                        state.copy(
+                            forgeChatMessages = state.forgeChatMessages + offlineReply,
+                            isForgeChatSending = false,
+                            statusMessage = "Local trained model server offline — generated with Training-Aware Offline (0 Tokens) fallback"
+                        )
+                    }
+                    return@launch
+                }
                 val errText = e.localizedMessage?.take(220)
                     ?: "No connected AI provider responded. Tap Select / Connect AIs to configure a provider."
                 val errorBubble = ForgeChatMessage(
@@ -5647,6 +6149,382 @@ class MainViewModel(
                 exportDialogTitle = "Export Fine-Tune Dataset (.jsonl — $lineCount samples)",
                 exportDialogText = jsonl,
                 statusMessage = "Prepared fine-tune JSONL dataset ($lineCount training lines @ ${state.targetAssetFps} FPS)."
+            )
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Adjustable Layer 1 Base, Layer 2 Plug-Ins & Master Hub Wiki Canon Sync
+    // -------------------------------------------------------------------------
+
+    fun saveCustomLayer1BaseText(newText: String) {
+        val registry = OmniAiRouter.getContextRegistry()
+        registry.updateBuiltInLayer1Content(newText)
+        val customized = registry.isBuiltInLayer1Customized()
+        _uiState.update { state ->
+            state.copy(
+                knowledgeSources = registry.getSources(),
+                isLayer1BaseCustomized = customized,
+                layer1BaseContent = registry.getBuiltInLayer1Content(),
+                layer1BaseEnabled = registry.isBuiltInLayer1Enabled(),
+                statusMessage = if (customized) {
+                    "Saved customized Layer 1 AI Base (synced across Form + Chat)."
+                } else {
+                    "Layer 1 AI Base matches factory default."
+                }
+            )
+        }
+    }
+
+    fun resetLayer1BaseToFactoryDefault() {
+        val registry = OmniAiRouter.getContextRegistry()
+        registry.resetBuiltInLayer1ToDefault()
+        _uiState.update { state ->
+            state.copy(
+                knowledgeSources = registry.getSources(),
+                isLayer1BaseCustomized = false,
+                layer1BaseContent = registry.getBuiltInLayer1Content(),
+                layer1BaseEnabled = registry.isBuiltInLayer1Enabled(),
+                statusMessage = "Restored Layer 1 AI Base to factory default doctrine."
+            )
+        }
+    }
+
+    fun resetBuiltInLayer1TrainingProfile() = resetLayer1BaseToFactoryDefault()
+
+    fun toggleBuiltInLayer1Enabled(enabled: Boolean) {
+        val registry = OmniAiRouter.getContextRegistry()
+        registry.setBuiltInLayer1Enabled(enabled)
+        _uiState.update { state ->
+            state.copy(
+                knowledgeSources = registry.getSources(),
+                layer1BaseEnabled = enabled,
+                statusMessage = if (enabled) "Enabled Layer 1 AI Base." else "Paused Layer 1 AI Base."
+            )
+        }
+    }
+
+    fun attachLayer2TrainingPlugin(name: String, content: String) {
+        val cleanContent = content.trim()
+        if (cleanContent.isBlank()) {
+            postStatusMessage("Paste or select Layer 2 plug-in content first.")
+            return
+        }
+        val registry = OmniAiRouter.getContextRegistry()
+        val entry = registry.attachLayer2Plugin(pluginName = name, content = cleanContent, enabled = true)
+        _uiState.update { state ->
+            state.copy(
+                knowledgeSources = registry.getSources(),
+                layer2Plugins = registry.listLayer2Plugins(),
+                statusMessage = "Plugged in Layer 2 module '${entry.title}' (${entry.content.length} chars)."
+            )
+        }
+    }
+
+    fun importLayer2PluginFile(context: Context, uri: Uri, name: String) {
+        val appCtx = context.applicationContext
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val maxBytes = 256 * 1024
+                val rawText = appCtx.contentResolver.openInputStream(uri)?.use { input ->
+                    val buffer = ByteArray(8192)
+                    val out = ByteArrayOutputStream()
+                    var total = 0
+                    while (total < maxBytes) {
+                        val toRead = (maxBytes - total).coerceAtMost(buffer.size)
+                        val read = input.read(buffer, 0, toRead)
+                        if (read <= 0) break
+                        out.write(buffer, 0, read)
+                        total += read
+                    }
+                    String(out.toByteArray(), Charsets.UTF_8)
+                }.orEmpty().trim()
+                if (rawText.isBlank()) {
+                    throw IllegalArgumentException("Selected Layer 2 plug-in file is empty.")
+                }
+                val cleanTitle = name.trim().substringBeforeLast('.').ifBlank { name.trim().ifBlank { "Layer 2 Plug-In" } }
+                val registry = OmniAiRouter.getContextRegistry()
+                val entry = registry.attachLayer2Plugin(pluginName = cleanTitle, content = rawText, enabled = true)
+                _uiState.update { state ->
+                    state.copy(
+                        knowledgeSources = registry.getSources(),
+                        layer2Plugins = registry.listLayer2Plugins(),
+                        statusMessage = "Plugged in Layer 2 file '${entry.title}' (${entry.content.length} chars)."
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Failed to import Layer 2 plug-in file '$name'", e)
+                postStatusMessage("Layer 2 plug-in import failed: ${e.localizedMessage ?: "Unreadable file."}")
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Offline-First (0 Tokens), Low-Token Micro Mode & Explicit Model Selection
+    // -------------------------------------------------------------------------
+
+    fun toggleOfflineZeroTokenMode() {
+        val current = _uiState.value
+        if (current.offlineZeroTokenMode) {
+            if (!current.userExplicitlySelectedAiModel || current.activeExplicitModelId.isBlank()) {
+                postStatusMessage("Choose an AI model in AI Hub first to enable Live AI")
+                return
+            }
+            _uiState.update {
+                it.copy(
+                    offlineZeroTokenMode = false,
+                    statusMessage = "Switched to Live AI (${it.activeExplicitModelId})."
+                )
+            }
+        } else {
+            _uiState.update {
+                it.copy(
+                    offlineZeroTokenMode = true,
+                    statusMessage = "Switched to Offline (0 Tokens) Procedural Mode."
+                )
+            }
+        }
+    }
+
+    fun toggleLowTokenMicroPromptMode() {
+        _uiState.update { state ->
+            val next = !state.lowTokenMicroPromptMode
+            state.copy(
+                lowTokenMicroPromptMode = next,
+                statusMessage = if (next) {
+                    "Low-Token Micro Prompt Mode ON (~75-token Layer 1 digest, 1,400-char cap)."
+                } else {
+                    "Full Context Prompt Mode ON (complete Layer 1 + Layer 2 + Wiki)."
+                }
+            )
+        }
+    }
+
+    fun applyLocalAiPreset(preset: LocalAiEndpointPreset) {
+        OmniAiRouter.updateProviderSettings(
+            provider = AiProviderType.LOCAL_OPENAI_COMPAT,
+            baseUrl = preset.baseUrl
+        )
+        OmniAiRouter.clearProviderModelId(AiProviderType.LOCAL_OPENAI_COMPAT)
+        val clearedProfile = _uiState.value.userAiTrainingProfile.copy(
+            explicitChosenProviderName = "",
+            explicitChosenModelId = ""
+        )
+        appContext?.let { UserAiTrainingProfileStore.save(it, clearedProfile) }
+        _uiState.update { state ->
+            state.copy(
+                userAiTrainingProfile = clearedProfile,
+                userExplicitlySelectedAiModel = false,
+                activeExplicitModelId = "",
+                offlineZeroTokenMode = true,
+                lastLocalEndpointPingResult = null,
+                aiProviderProfiles = OmniAiRouter.getAllProviderProfiles(),
+                omniAiRouting = OmniAiRouter.getRoutingConfig(),
+                statusMessage = "Applied ${preset.label} URL (${preset.baseUrl}). Ping & choose your model to enable Live AI."
+            )
+        }
+    }
+
+    fun selectExplicitAiModel(provider: AiProviderType, modelId: String) {
+        val cleanModel = modelId.trim()
+        if (cleanModel.isBlank()) {
+            postStatusMessage("Enter or discover a model ID before selecting it.")
+            return
+        }
+        OmniAiRouter.updateProviderSettings(
+            provider = provider,
+            textModelId = cleanModel,
+            markLocalConnected = if (provider == AiProviderType.LOCAL_OPENAI_COMPAT) true else null
+        )
+        OmniAiRouter.setActiveProviderForRole(AiTaskRole.TEXT_AND_SPECS, provider)
+        OmniAiRouter.setActiveProviderForRole(AiTaskRole.VISION_REVIEW, provider)
+        if (provider.supportsImageGeneration) {
+            OmniAiRouter.setActiveProviderForRole(AiTaskRole.IMAGE_GENERATION, provider)
+        }
+        val updatedProfile = _uiState.value.userAiTrainingProfile.copy(
+            explicitChosenProviderName = provider.name,
+            explicitChosenModelId = cleanModel
+        )
+        appContext?.let { UserAiTrainingProfileStore.save(it, updatedProfile) }
+        _uiState.update { state ->
+            state.copy(
+                userAiTrainingProfile = updatedProfile,
+                userExplicitlySelectedAiModel = true,
+                activeExplicitModelId = cleanModel,
+                offlineZeroTokenMode = false,
+                aiProviderProfiles = OmniAiRouter.getAllProviderProfiles(),
+                omniAiRouting = OmniAiRouter.getRoutingConfig(),
+                statusMessage = "Active Live AI Model set to $cleanModel (${provider.defaultDisplayName})."
+            )
+        }
+    }
+
+    fun clearExplicitAiModelSelection() {
+        val clearedProfile = _uiState.value.userAiTrainingProfile.copy(
+            explicitChosenProviderName = "",
+            explicitChosenModelId = ""
+        )
+        appContext?.let { UserAiTrainingProfileStore.save(it, clearedProfile) }
+        _uiState.update { state ->
+            state.copy(
+                userAiTrainingProfile = clearedProfile,
+                userExplicitlySelectedAiModel = false,
+                activeExplicitModelId = "",
+                offlineZeroTokenMode = true,
+                statusMessage = "Cleared chosen Live AI model — returned to Auto-Offline (0 Tokens) Mode."
+            )
+        }
+    }
+
+    fun pingLocalAiEndpoint(baseUrl: String) {
+        if (_uiState.value.isPingingLocalEndpoint) return
+        _uiState.update {
+            it.copy(
+                isPingingLocalEndpoint = true,
+                statusMessage = "Pinging local AI endpoint for installed models..."
+            )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = LocalAiEndpointDiagnostics.pingAndDiscoverModels(baseUrl)
+            _uiState.update { state ->
+                state.copy(
+                    isPingingLocalEndpoint = false,
+                    lastLocalEndpointPingResult = result,
+                    statusMessage = result.summary
+                )
+            }
+        }
+    }
+
+    fun syncMasterHubWikiFromUrl(context: Context, url: String) {
+        val cleanUrl = url.trim()
+        if (cleanUrl.isEmpty()) {
+            postStatusMessage("Enter an https:// Master Hub world_bible.json or .md URL first.")
+            return
+        }
+        if (_uiState.value.isSyncingMasterHubWiki) return
+        val appCtx = context.applicationContext
+
+        _uiState.update {
+            it.copy(
+                isSyncingMasterHubWiki = true,
+                statusMessage = "Syncing Master Hub Wiki from URL..."
+            )
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val (label, entries) = MasterHubWikiSyncEngine.fetchWikiFromHttpsUrl(cleanUrl)
+                val updatedState = MasterHubWikiCacheState(
+                    sourceLabel = label,
+                    wikiUrl = cleanUrl,
+                    entries = entries,
+                    lastSyncedMillis = System.currentTimeMillis(),
+                    enabledForAiBase = _uiState.value.masterHubWikiState.enabledForAiBase
+                )
+                MasterHubWikiSyncEngine.saveCache(appCtx, updatedState)
+                _uiState.update { state ->
+                    state.copy(
+                        masterHubWikiState = updatedState,
+                        isSyncingMasterHubWiki = false,
+                        statusMessage = "Synced ${entries.size} Master Hub Wiki entries from $label"
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Master Hub Wiki URL sync failed for '$cleanUrl'", e)
+                _uiState.update { state ->
+                    state.copy(
+                        isSyncingMasterHubWiki = false,
+                        statusMessage = "Master Hub Wiki sync failed: ${e.localizedMessage ?: "Check HTTPS URL and connection."}"
+                    )
+                }
+            }
+        }
+    }
+
+    fun importMasterHubWikiFile(context: Context, uri: Uri, displayName: String) {
+        val appCtx = context.applicationContext
+        _uiState.update {
+            it.copy(
+                isSyncingMasterHubWiki = true,
+                statusMessage = "Importing Master Hub Wiki file..."
+            )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val maxBytes = 1024 * 1024 // 1 MB clean cap
+                val rawText = appCtx.contentResolver.openInputStream(uri)?.use { input ->
+                    val buffer = ByteArray(8192)
+                    val out = ByteArrayOutputStream()
+                    var total = 0
+                    while (total < maxBytes) {
+                        val toRead = (maxBytes - total).coerceAtMost(buffer.size)
+                        val read = input.read(buffer, 0, toRead)
+                        if (read <= 0) break
+                        out.write(buffer, 0, read)
+                        total += read
+                    }
+                    String(out.toByteArray(), Charsets.UTF_8)
+                }.orEmpty().trim()
+
+                if (rawText.isEmpty()) {
+                    throw IllegalArgumentException("Selected World Bible file is empty.")
+                }
+
+                val safeName = displayName.trim().ifBlank { "world_bible.json" }
+                val entries = MasterHubWikiSyncEngine.parseAuto(safeName, rawText)
+                if (entries.isEmpty()) {
+                    throw IllegalArgumentException("Could not parse any Wiki canon entries from '$safeName'.")
+                }
+
+                val updatedState = MasterHubWikiCacheState(
+                    sourceLabel = safeName,
+                    wikiUrl = _uiState.value.masterHubWikiState.wikiUrl,
+                    entries = entries,
+                    lastSyncedMillis = System.currentTimeMillis(),
+                    enabledForAiBase = true
+                )
+                MasterHubWikiSyncEngine.saveCache(appCtx, updatedState)
+                _uiState.update { state ->
+                    state.copy(
+                        masterHubWikiState = updatedState,
+                        isSyncingMasterHubWiki = false,
+                        statusMessage = "Imported ${entries.size} Master Hub Wiki entries from $safeName"
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Master Hub Wiki file import failed for '$displayName'", e)
+                _uiState.update { state ->
+                    state.copy(
+                        isSyncingMasterHubWiki = false,
+                        statusMessage = "Wiki file import failed: ${e.localizedMessage ?: "Unsupported or unreadable file."}"
+                    )
+                }
+            }
+        }
+    }
+
+    fun toggleMasterHubWikiForAiBase(context: Context, enabled: Boolean) {
+        val updated = _uiState.value.masterHubWikiState.copy(enabledForAiBase = enabled)
+        MasterHubWikiSyncEngine.saveCache(context.applicationContext, updated)
+        _uiState.update { state ->
+            state.copy(
+                masterHubWikiState = updated,
+                statusMessage = if (enabled) {
+                    "Master Hub Wiki Canon enabled for Form + Chat AI Base."
+                } else {
+                    "Master Hub Wiki Canon paused for AI Base."
+                }
+            )
+        }
+    }
+
+    fun clearMasterHubWikiCache(context: Context) {
+        val cleared = MasterHubWikiSyncEngine.clearCache(context.applicationContext)
+        _uiState.update { state ->
+            state.copy(
+                masterHubWikiState = cleared,
+                statusMessage = "Cleared cached Master Hub Wiki entries."
             )
         }
     }

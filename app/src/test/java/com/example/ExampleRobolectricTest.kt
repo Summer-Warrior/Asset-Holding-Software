@@ -1114,7 +1114,7 @@ class ExampleRobolectricTest {
     )
 
     val allSources = registry.getSources()
-    assertEquals(3, allSources.size) // Active Project + 2 added notes
+    assertEquals(4, allSources.size) // Built-in Layer 1 + Active Project + 2 added notes
     val paletteEntry = allSources.first { it.title == "Palette Constraints" }
 
     // 2. Assemble with all enabled
@@ -2919,6 +2919,343 @@ class ExampleRobolectricTest {
       fallbackUserPrompt = "dragon"
     )
     assertEquals(com.example.ai.AiBuildTargetKind.SPRITE_2D, t2d)
+  }
+
+  @Test
+  fun `test master hub wiki parser json markdown relevance lookup and disk cache round trip`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    com.example.ai.MasterHubWikiSyncEngine.clearCache(context)
+
+    // 1. Parse sample world_bible.json with characters, factions, and species arrays
+    val sampleWorldBibleJson = """
+      {
+        "worldName": "Aether Nexus Chronicles",
+        "summary": "High-contrast 32-bit arcade sci-fantasy realm powered by Mana Circuits.",
+        "characters": [
+          {
+            "id": "char_kaelen",
+            "name": "Kaelen",
+            "category": "Protagonist",
+            "summary": "Vanguard courier of the Aegis Grid wielding a twin-phase plasma glaive.",
+            "visualTraits": "Matte obsidian armor with glowing cyan Mana Circuit trim and asymmetric cape",
+            "tags": ["aegis", "obsidian", "courier"]
+          },
+          {
+            "id": "char_lyra",
+            "name": "Lyra",
+            "category": "Tactician",
+            "summary": "Archivist commander coordinating orbital prism relays.",
+            "visualTraits": "Ivory cloak, emerald visor lens, brass astrolabe staff",
+            "tags": ["archivist", "prism"]
+          }
+        ],
+        "factions": [
+          {
+            "id": "fac_aegis",
+            "title": "Aegis Grid",
+            "description": "Orbital defense guild safeguarding ancient star-forges.",
+            "designNotes": "Hexagonal obsidian plating and electric cyan emblems",
+            "tags": ["guild", "obsidian", "cyan"]
+          }
+        ],
+        "species": [
+          {
+            "id": "sp_solarix",
+            "name": "Solarix",
+            "bio": "Solar-winged crystal drakes nesting on orbital spires.",
+            "appearance": "Golden crystalline crest, translucent solar feathers",
+            "traits": ["drake", "solar", "aerial"]
+          }
+        ]
+      }
+    """.trimIndent()
+
+    val jsonEntries = com.example.ai.MasterHubWikiSyncEngine.parseAuto("world_bible.json", sampleWorldBibleJson)
+    assertTrue("Expected at least 5 parsed JSON entries (primer + 2 chars + faction + species)", jsonEntries.size >= 5)
+    assertTrue(jsonEntries.any { it.title == "Kaelen" && it.visualTraits.contains("obsidian armor") })
+    assertTrue(jsonEntries.any { it.title == "Aegis Grid" })
+    assertTrue(jsonEntries.any { it.title == "Solarix" })
+
+    // 2. Parse sample MPV_01_LORE_AND_WIKI.md with ## and ### sections
+    val sampleMarkdown = """
+      # MPV Nexus World Bible
+      Core archive of realms and iconic fighters.
+
+      ## Characters
+      ### Kaelen
+      - Visual Traits: Matte obsidian armor, twin cyan visor glow, weathered crimson scarf.
+      - Tags: #protagonist, #obsidian, #aegis
+      Elite vanguard scout from Sector Nine.
+
+      ### Vexra
+      - Visual Traits: Chrome mantis carapace with magenta arc blades.
+      Rogue automaton hunter.
+
+      ## Factions
+      ### Iron Vanguard
+      Heavy mech corps patrolling the outer ring.
+    """.trimIndent()
+
+    val mdEntries = com.example.ai.MasterHubWikiSyncEngine.parseAuto("MPV_01_LORE_AND_WIKI.md", sampleMarkdown)
+    assertTrue("Expected parsed Markdown sections", mdEntries.size >= 3)
+    val mdKaelen = mdEntries.firstOrNull { it.title == "Kaelen" }
+    assertNotNull("Kaelen should be parsed from Markdown", mdKaelen)
+    assertEquals("Characters", mdKaelen!!.category)
+    assertTrue(mdKaelen.visualTraits.contains("obsidian armor"))
+
+    // 3. Prompt-aware relevance lookup ranks Kaelen first and includes visualTraits in [MASTER HUB WIKI CANON DETAILS]
+    val relevantBlock = com.example.ai.MasterHubWikiSyncEngine.buildRelevantWikiContextBlock(
+      entries = jsonEntries,
+      activePromptOrChat = "Kaelen obsidian armor"
+    )
+    assertTrue(relevantBlock.startsWith("[MASTER HUB WIKI CANON DETAILS]"))
+    val kaelenIdx = relevantBlock.indexOf("- Kaelen")
+    val lyraIdx = relevantBlock.indexOf("- Lyra")
+    assertTrue("Kaelen must appear in relevant block", kaelenIdx > 0)
+    if (lyraIdx >= 0) {
+      assertTrue("Kaelen must be ranked ahead of unrelated Lyra", kaelenIdx < lyraIdx)
+    }
+    assertTrue(relevantBlock.contains("Matte obsidian armor with glowing cyan Mana Circuit trim"))
+
+    // 4. Disk cache saveCache -> loadCache round-trip to filesDir/master_hub_wiki_cache.json
+    val cacheState = com.example.ai.MasterHubWikiCacheState(
+      sourceLabel = "world_bible.json",
+      wikiUrl = "https://raw.githubusercontent.com/Summer-Warrior/Nexus-Hub/main/world_bible.json",
+      entries = jsonEntries,
+      lastSyncedMillis = 1_730_000_000_000L,
+      enabledForAiBase = true
+    )
+    com.example.ai.MasterHubWikiSyncEngine.saveCache(context, cacheState)
+    val cacheFile = java.io.File(context.filesDir, com.example.ai.MasterHubWikiSyncEngine.CACHE_FILE_NAME)
+    assertTrue("Disk cache file must exist in filesDir", cacheFile.exists())
+
+    val reloaded = com.example.ai.MasterHubWikiSyncEngine.loadCache(context)
+    assertEquals(cacheState.sourceLabel, reloaded.sourceLabel)
+    assertEquals(cacheState.wikiUrl, reloaded.wikiUrl)
+    assertEquals(cacheState.entries.size, reloaded.entries.size)
+    assertEquals(true, reloaded.enabledForAiBase)
+    assertTrue(reloaded.entries.any { it.title == "Kaelen" && it.visualTraits.contains("Mana Circuit") })
+  }
+
+  @Test
+  fun `test adjustable layer 1 base modular layer 2 plugin slot and master hub wiki sync`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    java.io.File(context.filesDir, com.example.ai.MultiSourceContextRegistry.SOURCES_FILE_NAME).delete()
+    val registry = com.example.ai.MultiSourceContextRegistry(context)
+
+    // 1. Canonical Layer 1 & Micro-Digest checkerboard invariant (zero "checkerboard" before exclusions)
+    val fullProfile = com.example.ai.DefaultAiArtTrainingProfiles.LAYER_1_CANONICAL_PROFILE
+    val fullExclusionsIdx = fullProfile.indexOf("Strict Exclusions")
+    assertTrue("LAYER_1_CANONICAL_PROFILE must contain Strict Exclusions", fullExclusionsIdx > 0)
+    assertFalse(
+      "LAYER_1_CANONICAL_PROFILE must not mention checkerboard before Strict Exclusions",
+      fullProfile.substring(0, fullExclusionsIdx).lowercase().contains("checkerboard")
+    )
+
+    val microDigest = com.example.ai.DefaultAiArtTrainingProfiles.LAYER_1_MICRO_DIGEST
+    val microNoIdx = microDigest.indexOf("No ")
+    assertTrue("LAYER_1_MICRO_DIGEST must contain 'No ' exclusions", microNoIdx > 0)
+    assertFalse(
+      "LAYER_1_MICRO_DIGEST must not mention checkerboard before 'No '",
+      microDigest.substring(0, microNoIdx).lowercase().contains("checkerboard")
+    )
+    assertTrue(
+      "Micro digest must be compact (< 40% of full Layer 1 profile)",
+      microDigest.length < (fullProfile.length * 0.40)
+    )
+
+    // 2. Fresh registry starts with Layer 1 at index 0, factory default, and EMPTY Layer 2 plug-in slot
+    assertEquals(com.example.ai.DefaultAiArtTrainingProfiles.LAYER_1_SOURCE_ID, registry.getSources().first().id)
+    assertEquals(false, registry.isBuiltInLayer1Customized())
+    assertTrue("Layer 2 plug-in slot must start empty on fresh instance", registry.listLayer2Plugins().isEmpty())
+
+    // 3. Prefix-stable buildCombinedContextBlock: [LAYER 1 BASE] -> [LAYER 2 PLUG-IN(S)] -> [USER SOURCES]
+    val plugin = registry.attachLayer2Plugin(
+      pluginName = "Aether Tactics Bible",
+      content = "Use high-contrast emerald and obsidian armor silhouettes with 2-step cel shading."
+    )
+    assertEquals(1, registry.listLayer2Plugins().size)
+    assertTrue(com.example.ai.DefaultAiArtTrainingProfiles.isLayer2PluginSource(plugin))
+
+    val fullCombined = registry.buildCombinedContextBlock(
+      maxTotalChars = 10_000,
+      lowTokenMicroMode = false,
+      queryHint = "emerald armor",
+      activeProjectSummary = "Active Mesh: Cyber Vanguard"
+    )
+    assertTrue("Combined context must start with [LAYER 1 BASE]", fullCombined.startsWith("[LAYER 1 BASE]\n"))
+    val l1Idx = fullCombined.indexOf("[LAYER 1 BASE]")
+    val l2Idx = fullCombined.indexOf("[LAYER 2 PLUG-IN(S)]")
+    val userIdx = fullCombined.indexOf("[USER SOURCES]")
+    assertTrue("Layer 2 must follow Layer 1", l2Idx > l1Idx)
+    assertTrue("User sources must follow Layer 2", userIdx > l2Idx)
+    assertTrue(fullCombined.contains("Aether Tactics Bible"))
+
+    // 4. Low-Token Micro Mode caps <= 1,400 chars and uses LAYER_1_MICRO_DIGEST
+    val microCombined = registry.buildCombinedContextBlock(
+      maxTotalChars = 10_000,
+      lowTokenMicroMode = true,
+      queryHint = "emerald armor",
+      activeProjectSummary = "Active Mesh: Cyber Vanguard"
+    )
+    assertTrue("Low-token micro mode must cap to <= 1400 chars", microCombined.length <= 1_400)
+    assertTrue("Low-token micro mode must start with [LAYER 1 BASE]", microCombined.startsWith("[LAYER 1 BASE]\n"))
+    assertTrue(microCombined.contains("LAYER1_MICRO:"))
+
+    // 5. Edit Layer 1 Base in-place, persist across reload, and restore factory default
+    registry.updateBuiltInLayer1Content("Custom Layer 1 Studio Override")
+    assertEquals(true, registry.isBuiltInLayer1Customized())
+    assertEquals("Custom Layer 1 Studio Override", registry.getBuiltInLayer1Content())
+    assertTrue(registry.buildCombinedContextBlock(lowTokenMicroMode = false).contains("Custom Layer 1 Studio Override"))
+
+    val reloadedRegistry = com.example.ai.MultiSourceContextRegistry(context)
+    assertEquals(true, reloadedRegistry.isBuiltInLayer1Customized())
+    assertEquals(1, reloadedRegistry.listLayer2Plugins().size)
+    assertTrue(reloadedRegistry.buildCombinedContextBlock(lowTokenMicroMode = false).contains("Custom Layer 1 Studio Override"))
+
+    reloadedRegistry.resetBuiltInLayer1ToDefault()
+    assertEquals(false, reloadedRegistry.isBuiltInLayer1Customized())
+    val restoredBlock = reloadedRegistry.buildCombinedContextBlock(lowTokenMicroMode = false)
+    assertTrue(restoredBlock.contains("4-MEDIUM BLEND"))
+    assertEquals(false, restoredBlock.contains("Custom Layer 1 Studio Override"))
+  }
+
+  @Test
+  fun `test auto picked offline mode explicit model gate trained model ranking and training aware offline forge`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    // Clear any saved explicit model preference
+    com.example.ai.UserAiTrainingProfileStore.save(context, com.example.ai.UserAiTrainingProfile())
+
+    // 1. Fresh ViewModel auto-picks Offline (0 Tokens) + Low-Token Micro Mode + NO auto-chosen Live model
+    val vm = MainViewModel()
+    assertTrue("Offline (0 Tokens) must be ON by default", vm.uiState.value.offlineZeroTokenMode)
+    assertTrue("Low-Token Micro Prompt Mode must be ON by default", vm.uiState.value.lowTokenMicroPromptMode)
+    assertFalse("No AI model may be auto-selected on boot", vm.uiState.value.userExplicitlySelectedAiModel)
+    assertEquals("", vm.uiState.value.activeExplicitModelId)
+
+    // 2. Attempting to switch to Live AI before explicitly selecting a model is cleanly blocked
+    vm.toggleOfflineZeroTokenMode()
+    assertTrue("Must remain in Offline mode until a model is explicitly chosen", vm.uiState.value.offlineZeroTokenMode)
+    assertTrue(
+      "Status message should instruct user to choose a model",
+      vm.uiState.value.statusMessage.orEmpty().contains("Choose an AI model", ignoreCase = true)
+    )
+
+    // 3. Explicit model selection enables Live AI, and Clear Model returns cleanly to Auto-Offline
+    vm.selectExplicitAiModel(com.example.ai.AiProviderType.LOCAL_OPENAI_COMPAT, "mpv-lora-qwen:7b")
+    assertTrue(vm.uiState.value.userExplicitlySelectedAiModel)
+    assertEquals("mpv-lora-qwen:7b", vm.uiState.value.activeExplicitModelId)
+    assertFalse("Selecting an explicit model switches out of Offline mode", vm.uiState.value.offlineZeroTokenMode)
+
+    vm.clearExplicitAiModelSelection()
+    assertFalse(vm.uiState.value.userExplicitlySelectedAiModel)
+    assertEquals("", vm.uiState.value.activeExplicitModelId)
+    assertTrue("Clearing explicit model returns to Offline (0 Tokens) mode", vm.uiState.value.offlineZeroTokenMode)
+
+    // 4. Local AI Presets are URL-only (zero fake/pre-filled default model)
+    assertEquals(4, com.example.ai.LocalAiEndpointDiagnostics.LOCAL_AI_PRESETS.size)
+    val ollamaPreset = com.example.ai.LocalAiEndpointDiagnostics.LOCAL_AI_PRESETS.first()
+    vm.applyLocalAiPreset(ollamaPreset)
+    val localProfile = com.example.ai.OmniAiRouter.getProviderProfile(com.example.ai.AiProviderType.LOCAL_OPENAI_COMPAT)
+    assertEquals(ollamaPreset.baseUrl, localProfile.baseUrl)
+    assertEquals("", localProfile.textModelId)
+    assertTrue(vm.uiState.value.offlineZeroTokenMode)
+
+    // 5. Real model discovery parser handles both OpenAI data[].id and Ollama models[].name
+    val openAiModelsJson = """{"object":"list","data":[{"id":"llama3.2:3b"},{"id":"mpv-truefusion-qwen:7b"}]}"""
+    val parsedOpenAi = com.example.ai.LocalAiEndpointDiagnostics.parseDiscoveredModelIds(openAiModelsJson)
+    assertEquals(listOf("llama3.2:3b", "mpv-truefusion-qwen:7b"), parsedOpenAi)
+
+    val ollamaTagsJson = """{"models":[{"name":"mistral:7b"},{"name":"mpv_cel_forge:latest"}]}"""
+    val parsedOllama = com.example.ai.LocalAiEndpointDiagnostics.parseDiscoveredModelIds(ollamaTagsJson)
+    assertEquals(listOf("mistral:7b", "mpv_cel_forge:latest"), parsedOllama)
+
+    // 6. Discovered models matching UserAiTrainingProfile are ranked first with isUserTrainedMatch == true
+    val trainedProfile = com.example.ai.UserAiTrainingProfile(
+      styleTriggerToken = "mpv_truefusion",
+      customLoraOrModelTag = "<lora:mpv_cel_forge:0.85>",
+      explicitChosenProviderName = com.example.ai.AiProviderType.LOCAL_OPENAI_COMPAT.name,
+      explicitChosenModelId = "mpv-truefusion-qwen:7b"
+    )
+    com.example.ai.UserAiTrainingProfileStore.save(context, trainedProfile)
+    val reloadedProfile = com.example.ai.UserAiTrainingProfileStore.load(context)
+    assertEquals("mpv-truefusion-qwen:7b", reloadedProfile.explicitChosenModelId)
+    assertEquals(com.example.ai.AiProviderType.LOCAL_OPENAI_COMPAT.name, reloadedProfile.explicitChosenProviderName)
+
+    val ranked = com.example.ai.LocalAiEndpointDiagnostics.rankDiscoveredModelsWithUserTrainingFirst(
+      discoveredModels = listOf("llama3.2:3b", "qwen2.5:7b", "mpv-truefusion-qwen:7b"),
+      trainingProfile = trainedProfile
+    )
+    assertEquals("mpv-truefusion-qwen:7b", ranked.first().first)
+    assertTrue("Matched user-trained model must be flagged true", ranked.first().second)
+    assertFalse("Unmatched base model must be flagged false", ranked.last().second)
+
+    // 7. Training-Aware OfflineProceduralForge builds all 5 modalities + Director Chat at 0 tokens
+    val hints = "obsidian armor with glowing cyan Mana Circuit trim and solar gold crest"
+    val (spriteProj, spriteSheet) = com.example.ai.OfflineProceduralForge.buildOffline2DSpriteSheet(
+      assetName = "Kaelen Offline",
+      prompt = "emerald dragon knight with twin wings",
+      sizePx = 32,
+      frameCount = 4,
+      targetFps = 24,
+      trainingHints = hints
+    )
+    assertEquals(4, spriteProj.frames.size)
+    assertEquals(4, spriteSheet.frames.size)
+    assertEquals("OFFLINE PROCEDURAL 2D", spriteSheet.sourceKindLabel)
+    assertTrue("Offline sprite must paint non-transparent pixels", spriteProj.frames[0].any { it != android.graphics.Color.TRANSPARENT })
+
+    val (modelProj, mesh3D) = com.example.ai.OfflineProceduralForge.buildOffline3DModel(
+      assetName = "Vanguard Mech",
+      prompt = "twin-winged cyber dragon mech with visor",
+      trainingHints = hints
+    )
+    assertTrue("Offline 3D model must contain multiple kitbash parts", modelProj.parts.size >= 4)
+    assertTrue("Compiled offline mesh must have vertices and faces", mesh3D.vertexCount > 24 && mesh3D.faceCount > 16)
+    assertEquals("OFFLINE PROCEDURAL 3D", mesh3D.sourceKindLabel)
+
+    val texProj = com.example.ai.OfflineProceduralForge.buildOfflineTexture(
+      assetName = "Circuit Plate",
+      prompt = "obsidian mana circuit armor plate",
+      sizePx = 32,
+      trainingHints = hints
+    )
+    assertEquals(32, texProj.sizePx)
+    assertEquals(1024, texProj.pixels.size)
+
+    val (crySpec, cryEntry) = com.example.ai.OfflineProceduralForge.buildOfflineAudioCry(
+      title = "Solar Drake Roar",
+      prompt = "deep resonant crystal dragon roar",
+      trainingHints = hints
+    )
+    assertTrue(crySpec.durationMs >= 200)
+    assertTrue("Offline cry must compute real waveform peaks", cryEntry.waveformPeaks.isNotEmpty())
+
+    val (scoreSpec, bgmEntry) = com.example.ai.OfflineProceduralForge.buildOfflineChiptune(
+      title = "Boss Overdrive",
+      prompt = "144 BPM boss battle chiptune",
+      trainingHints = hints
+    )
+    assertEquals(144, scoreSpec.bpm)
+    assertTrue("Offline 16-step chiptune must have multi-channel notes", scoreSpec.notes.size >= 16)
+    assertTrue("Offline chiptune must compute real waveform peaks", bgmEntry.waveformPeaks.isNotEmpty())
+
+    val chatReply = com.example.ai.OfflineProceduralForge.buildOfflineDirectorChatReply(
+      userMessage = "Design an armored cyber dragon sprite at 24 fps",
+      targetFps = 24,
+      relevantWikiContext = hints
+    )
+    assertEquals("Offline Procedural Engine (0 Tokens)", chatReply.providerUsed)
+    assertTrue("Offline Director chat must include BUILD_PROMPT:", chatReply.text.contains("BUILD_PROMPT:"))
+    assertFalse(chatReply.extractedBuildPrompt.isNullOrBlank())
+
+    // 8. End-to-end ViewModel offline creation executes cleanly with 0 network calls
+    vm.updatePromptText("emerald cyber knight with glowing cyan visor")
+    vm.updateScratchCreateAssetName("Kaelen ZeroToken")
+    vm.selectAiBuildTarget(com.example.ai.AiBuildTargetKind.MODEL_3D)
+    vm.buildBrandNewAssetWithAi()
+    assertEquals("Kaelen ZeroToken", vm.uiState.value.currentMesh.name)
+    assertEquals("OFFLINE PROCEDURAL 3D", vm.uiState.value.currentMesh.sourceKindLabel)
   }
 }
 

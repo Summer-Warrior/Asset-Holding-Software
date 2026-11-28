@@ -239,10 +239,12 @@ fun ForgeStudioScreen(
         val routing = uiState.omniAiRouting
         val activeKnowledgeCount = uiState.knowledgeSources.count { it.enabled }
         val connectedAiCount = uiState.aiProviderProfiles.count { it.isConnected }
+        val isOfflineMode = uiState.offlineZeroTokenMode
+        val barAccent = if (isOfflineMode) EmeraldGreen else CyanNeon
         Card(
             shape = RoundedCornerShape(12.dp),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF0A1426)),
-            border = androidx.compose.foundation.BorderStroke(1.2.dp, CyanNeon.copy(alpha = 0.65f)),
+            border = androidx.compose.foundation.BorderStroke(1.2.dp, barAccent.copy(alpha = 0.72f)),
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("forge_active_ai_provider_bar")
@@ -264,21 +266,25 @@ fun ForgeStudioScreen(
                         Icon(
                             imageVector = Icons.Default.Hub,
                             contentDescription = "Active AI Providers",
-                            tint = CyanNeon,
+                            tint = barAccent,
                             modifier = Modifier.size(16.dp)
                         )
                         Column {
                             Text(
-                                text = "ACTIVE AI ROUTING ($connectedAiCount CONNECTED)",
+                                text = if (isOfflineMode) {
+                                    "AUTO: Offline (0 Tokens) • Choose Model for Live AI"
+                                } else {
+                                    "Live Model: ${uiState.activeExplicitModelId}"
+                                },
                                 fontFamily = TechMono,
                                 fontSize = 9.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = CyanNeon
+                                color = barAccent
                             )
                             Text(
-                                text = "Text/Build: ${shortProviderName(routing.activeTextProvider)} • Image: ${shortProviderName(routing.activeImageProvider)} • Sources: $activeKnowledgeCount",
+                                text = "Text/Build: ${shortProviderName(routing.activeTextProvider)} • Image: ${shortProviderName(routing.activeImageProvider)} • Connected: $connectedAiCount • Sources: $activeKnowledgeCount",
                                 fontFamily = TechMono,
-                                fontSize = 9.sp,
+                                fontSize = 8.sp,
                                 color = Color(0xFFCBD5E1)
                             )
                         }
@@ -305,6 +311,55 @@ fun ForgeStudioScreen(
                             fontWeight = FontWeight.Bold
                         )
                     }
+                }
+
+                // Compact Offline (0 Tokens) & Low-Token Micro Mode Toggle Pills
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    FilterChip(
+                        selected = uiState.offlineZeroTokenMode,
+                        onClick = { viewModel.toggleOfflineZeroTokenMode() },
+                        label = {
+                            Text(
+                                text = if (uiState.offlineZeroTokenMode) "Offline (0 Tokens): ON" else "Offline (0 Tokens): OFF",
+                                fontFamily = TechMono,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = EmeraldGreen,
+                            selectedLabelColor = Color(0xFF031B12),
+                            containerColor = Color(0xFF1E293B),
+                            labelColor = Color(0xFFE2E8F0)
+                        ),
+                        modifier = Modifier.testTag("forge_offline_zero_token_chip")
+                    )
+
+                    FilterChip(
+                        selected = uiState.lowTokenMicroPromptMode,
+                        onClick = { viewModel.toggleLowTokenMicroPromptMode() },
+                        label = {
+                            Text(
+                                text = if (uiState.lowTokenMicroPromptMode) "Low-Token Mode: ON" else "Low-Token Mode: FULL",
+                                fontFamily = TechMono,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = AmberGold,
+                            selectedLabelColor = Color(0xFF1A1102),
+                            containerColor = Color(0xFF1E293B),
+                            labelColor = Color(0xFFE2E8F0)
+                        ),
+                        modifier = Modifier.testTag("forge_low_token_micro_chip")
+                    )
                 }
             }
         }
@@ -421,13 +476,15 @@ fun ForgeStudioScreen(
                             }
                         }
 
-                        // Compact Unified Training Status Strip (Synced across Form + Chat)
+                        // Compact Unified Training & Wiki Status Strip (Synced across Form + Chat)
                         val tProfile = uiState.userAiTrainingProfile
                         val syncTargets = listOfNotNull(
                             if (tProfile.applyToFormBuilder) "Form" else null,
                             if (tProfile.applyToChatStudio) "Chat" else null
-                        ).joinToString(" + ").ifBlank { "Paused" }
-                        val triggerBadge = tProfile.styleTriggerToken.ifBlank { "None" }
+                        ).joinToString("+").ifBlank { "Paused" }
+                        val layer1Badge = if (uiState.isLayer1BaseCustomized) "Custom" else "Default"
+                        val l2Count = uiState.layer2Plugins.size
+                        val wikiCount = uiState.masterHubWikiState.entries.size
                         Surface(
                             color = Color(0xFF0A1224),
                             shape = RoundedCornerShape(10.dp),
@@ -450,14 +507,14 @@ fun ForgeStudioScreen(
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.ModelTraining,
-                                        contentDescription = "Unified Training Status",
+                                        contentDescription = "Unified Training & Wiki Status",
                                         tint = MagentaNeon,
                                         modifier = Modifier.size(15.dp)
                                     )
                                     Text(
-                                        text = "Training Synced: $syncTargets • Trigger: $triggerBadge",
+                                        text = "Layer 1 ($layer1Badge) • $l2Count Layer 2 Plug-Ins • $wikiCount Wiki Entries • Synced $syncTargets",
                                         fontFamily = TechMono,
-                                        fontSize = 9.sp,
+                                        fontSize = 8.sp,
                                         color = Color(0xFFE2E8F0)
                                     )
                                 }

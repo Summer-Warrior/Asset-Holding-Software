@@ -3,6 +3,7 @@ package com.example.ai
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -43,7 +44,215 @@ class MultiSourceContextRegistry(private val appContext: Context? = null) {
 
     init {
         loadFromDisk()
+        ensureBuiltInLayer1BasePresent()
         ensureActiveProjectSourcePresent()
+    }
+
+    /**
+     * Ensures the built-in Layer 1 Base entry exists at index `0` of [sources] without duplicating it.
+     * Modular Layer 2 plug-in slots intentionally start empty until the user plugs one in.
+     */
+    fun ensureBuiltInLayer1BasePresent() = synchronized(lock) {
+        val existingIdx = sources.indexOfFirst { it.id == DefaultAiArtTrainingProfiles.LAYER_1_SOURCE_ID }
+        if (existingIdx < 0) {
+            sources.add(
+                0,
+                KnowledgeSourceEntry(
+                    id = DefaultAiArtTrainingProfiles.LAYER_1_SOURCE_ID,
+                    title = DefaultAiArtTrainingProfiles.LAYER_1_TITLE,
+                    kind = KnowledgeSourceKind.NOTEBOOK_MARKDOWN,
+                    originLabel = "Built-In Layer 1 Canonical AI Base",
+                    content = DefaultAiArtTrainingProfiles.LAYER_1_CANONICAL_PROFILE,
+                    enabled = true
+                )
+            )
+            persistToDisk()
+        } else if (existingIdx > 0) {
+            val entry = sources.removeAt(existingIdx)
+            sources.add(0, entry)
+            persistToDisk()
+        }
+    }
+
+    /**
+     * Updates the built-in Layer 1 Base content in-place at index `0` and persists to disk.
+     */
+    fun updateBuiltInLayer1Content(customContent: String) = synchronized(lock) {
+        ensureBuiltInLayer1BasePresent()
+        val cleaned = customContent.trim().take(MAX_SINGLE_SOURCE_CHARS)
+        val effectiveContent = cleaned.ifBlank { DefaultAiArtTrainingProfiles.LAYER_1_CANONICAL_PROFILE }
+        val idx = sources.indexOfFirst { it.id == DefaultAiArtTrainingProfiles.LAYER_1_SOURCE_ID }
+        if (idx >= 0) {
+            sources[idx] = sources[idx].copy(
+                id = DefaultAiArtTrainingProfiles.LAYER_1_SOURCE_ID,
+                title = DefaultAiArtTrainingProfiles.LAYER_1_TITLE,
+                content = effectiveContent,
+                enabled = true,
+                updatedAtMillis = System.currentTimeMillis()
+            )
+            persistToDisk()
+        }
+    }
+
+    /**
+     * Restores the built-in Layer 1 Base cleanly to [DefaultAiArtTrainingProfiles.LAYER_1_CANONICAL_PROFILE].
+     */
+    fun resetBuiltInLayer1ToDefault() = synchronized(lock) {
+        ensureBuiltInLayer1BasePresent()
+        val idx = sources.indexOfFirst { it.id == DefaultAiArtTrainingProfiles.LAYER_1_SOURCE_ID }
+        if (idx >= 0) {
+            sources[idx] = sources[idx].copy(
+                id = DefaultAiArtTrainingProfiles.LAYER_1_SOURCE_ID,
+                title = DefaultAiArtTrainingProfiles.LAYER_1_TITLE,
+                content = DefaultAiArtTrainingProfiles.LAYER_1_CANONICAL_PROFILE,
+                enabled = true,
+                updatedAtMillis = System.currentTimeMillis()
+            )
+            persistToDisk()
+        }
+    }
+
+    fun getBuiltInLayer1Content(): String = synchronized(lock) {
+        sources.firstOrNull { it.id == DefaultAiArtTrainingProfiles.LAYER_1_SOURCE_ID }?.content
+            ?: DefaultAiArtTrainingProfiles.LAYER_1_CANONICAL_PROFILE
+    }
+
+    fun isBuiltInLayer1Customized(): Boolean = synchronized(lock) {
+        getBuiltInLayer1Content().trim() != DefaultAiArtTrainingProfiles.LAYER_1_CANONICAL_PROFILE.trim()
+    }
+
+    fun isBuiltInLayer1Enabled(): Boolean = synchronized(lock) {
+        sources.firstOrNull { it.id == DefaultAiArtTrainingProfiles.LAYER_1_SOURCE_ID }?.enabled ?: true
+    }
+
+    fun setBuiltInLayer1Enabled(enabled: Boolean) = synchronized(lock) {
+        ensureBuiltInLayer1BasePresent()
+        val idx = sources.indexOfFirst { it.id == DefaultAiArtTrainingProfiles.LAYER_1_SOURCE_ID }
+        if (idx >= 0) {
+            sources[idx] = sources[idx].copy(
+                enabled = enabled,
+                updatedAtMillis = System.currentTimeMillis()
+            )
+            persistToDisk()
+        }
+    }
+
+    /**
+     * Attaches a user-supplied modular Layer 2 plug-in (e.g., franchise art bible, specific game style,
+     * or custom rulebook) that stacks immediately after Layer 1 in [buildCombinedContextBlock].
+     */
+    fun attachLayer2Plugin(
+        pluginName: String,
+        content: String,
+        enabled: Boolean = true
+    ): KnowledgeSourceEntry = synchronized(lock) {
+        ensureBuiltInLayer1BasePresent()
+        val cleanName = pluginName.trim().ifBlank { "Layer 2 Style Plug-In" }
+        val cleanContent = content.trim().take(MAX_SINGLE_SOURCE_CHARS)
+        val entry = KnowledgeSourceEntry(
+            id = "${DefaultAiArtTrainingProfiles.LAYER_2_PLUGIN_ID_PREFIX}${UUID.randomUUID().toString().take(8)}",
+            title = cleanName,
+            kind = KnowledgeSourceKind.NOTEBOOK_MARKDOWN,
+            originLabel = "Layer 2 Modular Plug-In",
+            content = cleanContent,
+            enabled = enabled,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        // Insert right after index 0 (Layer 1) and any existing Layer 2 plug-ins
+        val insertIdx = sources.indexOfLast {
+            it.id == DefaultAiArtTrainingProfiles.LAYER_1_SOURCE_ID || DefaultAiArtTrainingProfiles.isLayer2PluginSource(it)
+        } + 1
+        sources.add(insertIdx.coerceIn(1, sources.size), entry)
+        persistToDisk()
+        entry
+    }
+
+    fun listLayer2Plugins(): List<KnowledgeSourceEntry> = synchronized(lock) {
+        sources.filter { DefaultAiArtTrainingProfiles.isLayer2PluginSource(it) }
+    }
+
+    /**
+     * Assembles the complete shared AI Base context in strict, prefix-stable layered order
+     * (zero changing timestamps at byte 0 for local LLM KV-cache prompt reuse):
+     * 1. `[LAYER 1 BASE]` (full profile or [DefaultAiArtTrainingProfiles.LAYER_1_MICRO_DIGEST] in low-token micro mode)
+     * 2. `[LAYER 2 PLUG-IN(S)]` (any enabled modular Layer 2 plug-ins)
+     * 3. `[USER SOURCES]` (enabled Active Project Context, user knowledge files, and pinned training examples)
+     */
+    fun buildCombinedContextBlock(
+        maxTotalChars: Int = DEFAULT_MAX_CONTEXT_CHARS,
+        lowTokenMicroMode: Boolean = false,
+        queryHint: String = "",
+        activeProjectSummary: String = ""
+    ): String {
+        val safeBudget = (if (lowTokenMicroMode) minOf(maxTotalChars, 1_400) else maxTotalChars).coerceAtLeast(240)
+        val builder = StringBuilder(safeBudget.coerceAtMost(16_384))
+
+        fun appendSectionBudgeted(sectionText: String) {
+            if (sectionText.isBlank()) return
+            val sep = if (builder.isNotEmpty()) "\n\n" else ""
+            val remaining = safeBudget - builder.length
+            if (remaining <= sep.length + 24) return
+            builder.append(sep)
+            val allow = safeBudget - builder.length
+            if (sectionText.length <= allow) {
+                builder.append(sectionText)
+            } else {
+                val suffix = "\n...[trimmed]"
+                val takeLen = (allow - suffix.length).coerceAtLeast(0)
+                if (takeLen > 0) {
+                    builder.append(sectionText.substring(0, takeLen).trimEnd())
+                    builder.append(suffix)
+                }
+            }
+        }
+
+        val (layer1Section, layer2Section) = synchronized(lock) {
+            val l1Entry = sources.firstOrNull { it.id == DefaultAiArtTrainingProfiles.LAYER_1_SOURCE_ID }
+            val l1Text = if (l1Entry != null && l1Entry.enabled && l1Entry.content.isNotBlank()) {
+                val body = if (lowTokenMicroMode) {
+                    DefaultAiArtTrainingProfiles.LAYER_1_MICRO_DIGEST
+                } else {
+                    l1Entry.content.trim()
+                }
+                "[LAYER 1 BASE]\n$body"
+            } else {
+                ""
+            }
+
+            val enabledL2 = sources.filter {
+                DefaultAiArtTrainingProfiles.isLayer2PluginSource(it) && it.enabled && it.content.isNotBlank()
+            }
+            val l2Text = if (enabledL2.isNotEmpty()) {
+                val perPluginCap = if (lowTokenMicroMode) 280 else MAX_SINGLE_SOURCE_CHARS
+                val body = enabledL2.joinToString("\n\n") { plugin ->
+                    val content = plugin.content.trim()
+                    val snippet = if (content.length <= perPluginCap) content else content.take(perPluginCap).trimEnd() + "..."
+                    "### [${plugin.title}]\n$snippet"
+                }
+                "[LAYER 2 PLUG-IN(S)]\n$body"
+            } else {
+                ""
+            }
+            l1Text to l2Text
+        }
+
+        if (layer1Section.isNotBlank()) appendSectionBudgeted(layer1Section)
+        if (layer2Section.isNotBlank()) appendSectionBudgeted(layer2Section)
+
+        val remainingForUserSources = safeBudget - builder.length - if (builder.isNotEmpty()) 18 else 0
+        if (remainingForUserSources >= 120) {
+            val userBlock = assembleContextBlock(
+                queryHint = queryHint,
+                activeProjectSummary = activeProjectSummary,
+                maxChars = remainingForUserSources
+            )
+            if (userBlock.isNotBlank()) {
+                appendSectionBudgeted("[USER SOURCES]\n$userBlock")
+            }
+        }
+
+        val combined = builder.toString().trim()
+        return if (combined.length <= safeBudget) combined else combined.substring(0, safeBudget)
     }
 
     fun getSources(): List<KnowledgeSourceEntry> = synchronized(lock) {
@@ -51,6 +260,7 @@ class MultiSourceContextRegistry(private val appContext: Context? = null) {
     }
 
     fun addSource(entry: KnowledgeSourceEntry): List<KnowledgeSourceEntry> = synchronized(lock) {
+        ensureBuiltInLayer1BasePresent()
         val cleaned = entry.copy(
             title = entry.title.trim().ifBlank { "Untitled Reference" },
             content = entry.content.trim().take(MAX_SINGLE_SOURCE_CHARS),
@@ -59,8 +269,11 @@ class MultiSourceContextRegistry(private val appContext: Context? = null) {
         val existingIdx = sources.indexOfFirst { it.id == cleaned.id }
         if (existingIdx >= 0) {
             sources[existingIdx] = cleaned
-        } else {
+        } else if (cleaned.id == DefaultAiArtTrainingProfiles.LAYER_1_SOURCE_ID) {
             sources.add(0, cleaned)
+        } else {
+            // Keep index 0 reserved for Layer 1 Base
+            sources.add(1.coerceAtMost(sources.size), cleaned)
         }
         persistToDisk()
         sources.toList()
@@ -94,11 +307,11 @@ class MultiSourceContextRegistry(private val appContext: Context? = null) {
     }
 
     fun removeSource(id: String): List<KnowledgeSourceEntry> = synchronized(lock) {
-        if (id == ACTIVE_PROJECT_SOURCE_ID) {
-            // Keep the live project slot toggleable rather than permanently deleting it
+        if (id == ACTIVE_PROJECT_SOURCE_ID || id == DefaultAiArtTrainingProfiles.LAYER_1_SOURCE_ID) {
+            // Keep built-in Layer 1 and live project slots toggleable rather than permanently deleting them
             val idx = sources.indexOfFirst { it.id == id }
             if (idx >= 0) {
-                sources[idx] = sources[idx].copy(enabled = false)
+                sources[idx] = sources[idx].copy(enabled = false, updatedAtMillis = System.currentTimeMillis())
                 persistToDisk()
             }
         } else {
@@ -235,7 +448,11 @@ class MultiSourceContextRegistry(private val appContext: Context? = null) {
     ): String {
         val safeBudget = maxChars.coerceAtLeast(120)
         val enabledEntries = synchronized(lock) {
-            sources.filter { it.enabled }.toList()
+            sources.filter {
+                it.enabled &&
+                    it.id != DefaultAiArtTrainingProfiles.LAYER_1_SOURCE_ID &&
+                    !DefaultAiArtTrainingProfiles.isLayer2PluginSource(it)
+            }.toList()
         }
         if (enabledEntries.isEmpty()) return ""
 
@@ -321,33 +538,52 @@ class MultiSourceContextRegistry(private val appContext: Context? = null) {
         return if (canonicalTarget.startsWith(prefix)) target else null
     }
 
-    private fun loadFromDisk() = synchronized(lock) {
-        val file = getStorageFile() ?: return
-        if (!file.exists()) return
-        try {
-            val raw = file.readText(Charsets.UTF_8)
-            if (raw.isBlank()) return
-            val root = JSONObject(raw)
-            val arr = root.optJSONArray("sources") ?: return
-            sources.clear()
-            for (i in 0 until arr.length()) {
-                val obj = arr.optJSONObject(i) ?: continue
-                val kind = KnowledgeSourceKind.entries.firstOrNull { it.name == obj.optString("kind") }
-                    ?: KnowledgeSourceKind.PASTED_NOTES
-                sources.add(
-                    KnowledgeSourceEntry(
-                        id = obj.optString("id").ifBlank { "src_$i" },
-                        title = obj.optString("title", "Reference"),
-                        kind = kind,
-                        originLabel = obj.optString("originLabel", ""),
-                        content = obj.optString("content", ""),
-                        enabled = obj.optBoolean("enabled", true),
-                        updatedAtMillis = obj.optLong("updatedAtMillis", System.currentTimeMillis())
+    private fun loadFromDisk() {
+        synchronized(lock) {
+            val file = getStorageFile() ?: return@synchronized
+            if (!file.exists()) return@synchronized
+            try {
+                val raw = file.readText(Charsets.UTF_8)
+                if (raw.isBlank()) return@synchronized
+                val root = JSONObject(raw)
+                val arr = root.optJSONArray("sources")
+                sources.clear()
+                if (arr != null) {
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.optJSONObject(i) ?: continue
+                        val kind = KnowledgeSourceKind.entries.firstOrNull { it.name == obj.optString("kind") }
+                            ?: KnowledgeSourceKind.PASTED_NOTES
+                        sources.add(
+                            KnowledgeSourceEntry(
+                                id = obj.optString("id").ifBlank { "src_$i" },
+                                title = obj.optString("title", "Reference"),
+                                kind = kind,
+                                originLabel = obj.optString("originLabel", ""),
+                                content = obj.optString("content", ""),
+                                enabled = obj.optBoolean("enabled", true),
+                                updatedAtMillis = obj.optLong("updatedAtMillis", System.currentTimeMillis())
+                            )
+                        )
+                    }
+                }
+                // Migrate legacy standalone layer1BaseContent field if LAYER_1_SOURCE_ID wasn't in sources yet
+                val savedLegacyLayer1 = root.optString("layer1BaseContent", "").trim()
+                if (savedLegacyLayer1.isNotEmpty() && sources.none { it.id == DefaultAiArtTrainingProfiles.LAYER_1_SOURCE_ID }) {
+                    sources.add(
+                        0,
+                        KnowledgeSourceEntry(
+                            id = DefaultAiArtTrainingProfiles.LAYER_1_SOURCE_ID,
+                            title = DefaultAiArtTrainingProfiles.LAYER_1_TITLE,
+                            kind = KnowledgeSourceKind.NOTEBOOK_MARKDOWN,
+                            originLabel = "Built-In Layer 1 Canonical AI Base",
+                            content = savedLegacyLayer1.take(MAX_SINGLE_SOURCE_CHARS),
+                            enabled = root.optBoolean("layer1BaseEnabled", true)
+                        )
                     )
-                )
+                }
+            } catch (e: Exception) {
+                Log.w("MultiSourceContext", "Failed to load saved AI sources from disk: ${e.message}")
             }
-        } catch (_: Exception) {
-            // Keep clean state if storage file was corrupted
         }
     }
 
@@ -369,11 +605,12 @@ class MultiSourceContextRegistry(private val appContext: Context? = null) {
                 )
             }
             val root = JSONObject().apply {
-                put("version", 1)
+                put("version", 3)
                 put("sources", arr)
             }
             file.writeText(root.toString(2), Charsets.UTF_8)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w("MultiSourceContext", "Failed to persist AI sources to disk: ${e.message}")
         }
     }
 
@@ -385,7 +622,8 @@ class MultiSourceContextRegistry(private val appContext: Context? = null) {
                     if (idx >= 0) cursor.getString(idx) else null
                 } else null
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w("MultiSourceContext", "Failed to query display name: ${e.message}")
             uri.lastPathSegment
         }
     }

@@ -137,6 +137,15 @@ object OmniAiRouter {
         editor?.apply()
     }
 
+    /**
+     * Explicitly clears the configured text model ID for [provider] to `""` (never pre-filling
+     * a fake or guessed default model ID) and persists the cleared state.
+     */
+    fun clearProviderModelId(provider: AiProviderType) {
+        customTextModels[provider] = ""
+        configPrefs?.edit()?.putString("text_model_${provider.name}", "")?.apply()
+    }
+
     fun saveProviderCredential(provider: AiProviderType, secret: String, hintPrefix: String = "API Key") {
         vault.saveCredential(provider, secret, hintPrefix)
         if (provider == AiProviderType.LOCAL_OPENAI_COMPAT && secret.isNotBlank()) {
