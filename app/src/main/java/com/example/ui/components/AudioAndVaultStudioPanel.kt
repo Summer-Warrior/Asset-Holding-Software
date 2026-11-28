@@ -58,6 +58,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -107,11 +108,18 @@ private val MutedSlate = Color(0xFF94A3B8)
 fun AudioAndVaultStudioPanel(
     uiState: AppUiState,
     viewModel: MainViewModel,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    openCreateTabTrigger: Int = 0
 ) {
     val context = LocalContext.current
     var activeTab by remember { mutableIntStateOf(0) }
     var importSlotName by remember { mutableStateOf("") }
+
+    LaunchedEffect(openCreateTabTrigger) {
+        if (openCreateTabTrigger > 0) {
+            activeTab = 2
+        }
+    }
     var markSensitive by remember { mutableStateOf(false) }
     var vaultPassphrase by remember { mutableStateOf("") }
     var pinInput by remember { mutableStateOf("") }
@@ -231,13 +239,13 @@ fun AudioAndVaultStudioPanel(
                 }
             }
 
-            // 2 Sub-Tabs
+            // 3 Sub-Tabs: Audio Vault & DSP | 6-Stage & Cold Vault | Create Audio
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 VaultStudioTabButton(
-                    label = "Audio Vault & DSP",
+                    label = "Audio Vault",
                     selected = activeTab == 0,
                     accent = CyanNeon,
                     onClick = { activeTab = 0 },
@@ -246,7 +254,7 @@ fun AudioAndVaultStudioPanel(
                         .testTag("audio_vault_tab_btn")
                 )
                 VaultStudioTabButton(
-                    label = "6-Stage & Cold Vault",
+                    label = "Cold Vault",
                     selected = activeTab == 1,
                     accent = EmeraldGreen,
                     onClick = { activeTab = 1 },
@@ -254,18 +262,30 @@ fun AudioAndVaultStudioPanel(
                         .weight(1f)
                         .testTag("cold_vault_tab_btn")
                 )
+                VaultStudioTabButton(
+                    label = "Create Audio",
+                    selected = activeTab == 2,
+                    accent = MagentaNeon,
+                    onClick = { activeTab = 2 },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("create_audio_tab_btn")
+                )
             }
 
-            if (activeTab == 0) {
-                AudioVaultDspTabContent(
+            when (activeTab) {
+                0 -> AudioVaultDspTabContent(
                     uiState = uiState,
                     viewModel = viewModel,
                     onImportAudioClick = {
                         audioImportLauncher.launch(arrayOf("audio/*", "application/json", "*/*"))
                     }
                 )
-            } else {
-                ColdVaultAndSixStageTabContent(
+                2 -> AudioComposerPanel(
+                    uiState = uiState,
+                    viewModel = viewModel
+                )
+                else -> ColdVaultAndSixStageTabContent(
                     uiState = uiState,
                     viewModel = viewModel,
                     slotName = importSlotName,

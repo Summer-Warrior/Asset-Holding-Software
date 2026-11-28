@@ -2219,6 +2219,142 @@ class ExampleRobolectricTest {
       state.roomAssetHistory.any { it.sourceOrigin == "SCRATCH 2D CANVAS" && it.title == "Original Dragon" }
     )
   }
+
+  @Test
+  fun `test scratch 3d primitive builder blank scene shapes mirror x and obj export`() {
+    val engine = com.example.model.model3d.Scratch3DBuilderEngine
+
+    // 1. Blank scene starts with 0 parts and compiles to 0 vertices
+    val blank = engine.createEmptyProject("Valkyrie Striker")
+    assertEquals(0, blank.parts.size)
+    val emptyMesh = engine.compileProjectToMesh3D(blank)
+    assertEquals(0, emptyMesh.vertexCount)
+    assertEquals(0, emptyMesh.faceCount)
+    assertEquals("CREATED FROM SCRATCH", emptyMesh.sourceKindLabel)
+
+    // 2. Add BOX, SPHERE, and mirrored WEDGE_WING (posX = 0.6f, mirrorX = true)
+    var proj = engine.addPart(blank, com.example.model.model3d.PrimitiveShapeType.BOX, 0xFF00E5FF)
+    proj = engine.addPart(proj, com.example.model.model3d.PrimitiveShapeType.SPHERE, 0xFFFF2A85)
+    proj = engine.addPart(proj, com.example.model.model3d.PrimitiveShapeType.WEDGE_WING, 0xFF10B981)
+    proj = engine.updateSelectedPart(proj) { it.copy(posX = 0.6f, mirrorX = true) }
+
+    assertEquals(3, proj.parts.size)
+    val compiled = engine.compileProjectToMesh3D(proj)
+    assertEquals("CREATED FROM SCRATCH", compiled.sourceKindLabel)
+    assertTrue("Compiled 3D mesh must have vertices", compiled.vertexCount > 30)
+    assertTrue("Compiled 3D mesh must have faces", compiled.faceCount > 20)
+    assertTrue("Mirrored mesh must have positive X vertices", compiled.vertices.any { it.x > 0.3f })
+    assertTrue("Mirrored mesh must have negative X vertices", compiled.vertices.any { it.x < -0.3f })
+
+    // 3. Wavefront OBJ export contains v and f records
+    val objText = com.example.model.model3d.ObjParser.exportToObj(compiled)
+    assertTrue("Exported OBJ must contain vertex rows", objText.contains("v "))
+    assertTrue("Exported OBJ must contain face rows", objText.contains("f "))
+
+    // 4. MainViewModel commit updates currentMesh, savedLibraryAssets, and roomAssetHistory
+    val vm = MainViewModel()
+    val initialLibCount = vm.uiState.value.savedLibraryAssets.size
+    vm.startNewBlank3DProject("Valkyrie Striker")
+    assertEquals(0, vm.uiState.value.scratch3DProject.parts.size)
+    vm.addScratch3DPart(com.example.model.model3d.PrimitiveShapeType.BOX)
+    vm.addScratch3DPart(com.example.model.model3d.PrimitiveShapeType.WEDGE_WING)
+    vm.commitScratch3DProjectToStudioAndVault()
+
+    val state = vm.uiState.value
+    assertEquals("Valkyrie Striker", state.currentMesh.name)
+    assertEquals("CREATED FROM SCRATCH", state.currentMesh.sourceKindLabel)
+    assertEquals(initialLibCount + 1, state.savedLibraryAssets.size)
+    assertTrue(
+      "roomAssetHistory must record SCRATCH 3D BUILDER entry",
+      state.roomAssetHistory.any { it.sourceOrigin == "SCRATCH 3D BUILDER" && it.title == "Valkyrie Striker" }
+    )
+  }
+
+  @Test
+  fun `test scratch texture engine mirror paint patterns and audio composer saves new tracks`() {
+    val texEngine = com.example.model.texture.ScratchTextureEngine
+
+    // 1. Blank 16x16 texture + 4-way quadrant mirror paint paints all 4 symmetrical corners cleanly
+    val blankTex = texEngine.createBlankTexture("Quad Armor", sizePx = 16)
+      .copy(mirrorX = true, mirrorY = true)
+    val cyan = android.graphics.Color.rgb(0x00, 0xE5, 0xFF)
+    val painted = texEngine.paintTexturePixel(blankTex, x = 1, y = 2, colorInt = cyan, brushSize = 1)
+
+    assertEquals(cyan, painted.pixels[2 * 16 + 1])
+    assertEquals(cyan, painted.pixels[2 * 16 + 14])
+    assertEquals(cyan, painted.pixels[13 * 16 + 1])
+    assertEquals(cyan, painted.pixels[13 * 16 + 14])
+
+    // 2. All 6 ProceduralMaterialPatterns produce valid 128x128 bitmaps
+    val p1 = android.graphics.Color.rgb(0x16, 0x1B, 0x26)
+    val p2 = android.graphics.Color.rgb(0x33, 0x41, 0x55)
+    val p3 = android.graphics.Color.rgb(0x10, 0xB9, 0x81)
+    com.example.model.texture.ProceduralMaterialPattern.entries.forEach { pattern ->
+      val proj = texEngine.generateMaterialPattern(
+        name = "Test ${pattern.label}",
+        sizePx = 32,
+        pattern = pattern,
+        primaryColorInt = p1,
+        secondaryColorInt = p2,
+        accentColorInt = p3
+      )
+      val bmp = texEngine.toExportBitmap(proj, outputDim = 128)
+      assertEquals("Bitmap width for ${pattern.name}", 128, bmp.width)
+      assertEquals("Bitmap height for ${pattern.name}", 128, bmp.height)
+    }
+
+    // 3. MainViewModel audio composer saves new cry and sequence entries with valid waveformPeaks (0f..1f)
+    val vm = MainViewModel()
+    val initialAudioCount = vm.uiState.value.audioVaultEntries.size
+
+    val crySpec = com.example.model.audio.ProceduralCrySpec(
+      speciesKey = "emerald_drake_custom",
+      baseFreqHz = 540f,
+      endFreqHz = 1240f,
+      durationMs = 450,
+      modulationHz = 22f,
+      noiseMix = 0.20f
+    )
+    vm.saveBrandNewCryToAudioVault(
+      title = "Emerald Drake Custom Cry",
+      slotKey = "cry_emerald_drake_custom",
+      spec = crySpec
+    )
+
+    val scoreSpec = com.example.model.audio.ScoreSequenceSpec(
+      title = "Foundry Overdrive",
+      bpm = 144,
+      notes = listOf(
+        com.example.model.audio.ScoreSequenceNote(0.0f, 0.25f, 60, 0.85f, 0),
+        com.example.model.audio.ScoreSequenceNote(0.25f, 0.25f, 64, 0.85f, 0),
+        com.example.model.audio.ScoreSequenceNote(0.50f, 0.25f, 67, 0.85f, 0),
+        com.example.model.audio.ScoreSequenceNote(0.75f, 0.25f, 72, 0.90f, 2),
+        com.example.model.audio.ScoreSequenceNote(0.0f, 0.50f, 48, 0.90f, 1)
+      )
+    )
+    vm.saveBrandNewSequenceToAudioVault(
+      title = "Foundry Overdrive",
+      slotKey = "bgm_foundry_overdrive",
+      spec = scoreSpec
+    )
+
+    val entries = vm.uiState.value.audioVaultEntries
+    assertEquals(initialAudioCount + 2, entries.size)
+
+    val savedCry = entries.firstOrNull { it.slotKey == "cry_emerald_drake_custom" }
+    assertNotNull("Saved cry must exist in audioVaultEntries", savedCry)
+    assertEquals(com.example.model.audio.AudioAssetFormat.AUDIO_CUE_JSON, savedCry!!.format)
+    assertTrue("Saved cry waveformPeaks must be non-empty", savedCry.waveformPeaks.isNotEmpty())
+    assertTrue("Saved cry peaks must be normalized 0f..1f", savedCry.waveformPeaks.all { it in 0f..1f })
+    assertTrue("Saved cry must have non-zero audio energy", savedCry.waveformPeaks.any { it > 0.05f })
+
+    val savedSeq = entries.firstOrNull { it.slotKey == "bgm_foundry_overdrive" }
+    assertNotNull("Saved sequence must exist in audioVaultEntries", savedSeq)
+    assertEquals(com.example.model.audio.AudioAssetFormat.SCORE_SEQ_JSON, savedSeq!!.format)
+    assertTrue("Saved sequence waveformPeaks must be non-empty", savedSeq.waveformPeaks.isNotEmpty())
+    assertTrue("Saved sequence peaks must be normalized 0f..1f", savedSeq.waveformPeaks.all { it in 0f..1f })
+    assertTrue("Saved sequence must have non-zero audio energy", savedSeq.waveformPeaks.any { it > 0.05f })
+  }
 }
 
 

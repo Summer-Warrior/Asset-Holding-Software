@@ -95,6 +95,7 @@ import com.example.ui.screens.HardwareLabScreen
 import com.example.ui.screens.ModelStudioScreen
 import com.example.ui.screens.SpriteStudioScreen
 import com.example.ui.screens.TextureStudioScreen
+import com.example.ui.theme.AmberGold
 import com.example.ui.theme.CardBorder
 import com.example.ui.theme.CyanNeon
 import com.example.ui.theme.EmeraldGreen
@@ -145,6 +146,9 @@ fun PixelForgeApp(viewModel: MainViewModel) {
     var showGalleriesOverlay by remember { mutableStateOf(false) }
     var showCreateNewDialog by remember { mutableStateOf(false) }
     var spriteCreateModeTrigger by remember { mutableIntStateOf(0) }
+    var model3DCreateModeTrigger by remember { mutableIntStateOf(0) }
+    var textureCreateModeTrigger by remember { mutableIntStateOf(0) }
+    var audioCreateTabTrigger by remember { mutableIntStateOf(0) }
     var forgeCreateTabTrigger by remember { mutableIntStateOf(0) }
 
     // Surface status notifications
@@ -307,13 +311,15 @@ fun PixelForgeApp(viewModel: MainViewModel) {
                 AssetGalleriesOverlayScreen(
                     uiState = uiState,
                     viewModel = viewModel,
-                    onBack = { showGalleriesOverlay = false }
+                    onBack = { showGalleriesOverlay = false },
+                    openAudioCreateTrigger = audioCreateTabTrigger
                 )
             } else {
                 when (selectedTab) {
                     0 -> ModelStudioScreen(
                         uiState = uiState,
                         viewModel = viewModel,
+                        openInCreateModeTrigger = model3DCreateModeTrigger,
                         onOpenHardwareLab = { selectedTab = 5 }
                     )
                     1 -> SpriteStudioScreen(
@@ -347,6 +353,7 @@ fun PixelForgeApp(viewModel: MainViewModel) {
                     4 -> TextureStudioScreen(
                         uiState = uiState,
                         viewModel = viewModel,
+                        openInCreateModeTrigger = textureCreateModeTrigger,
                         onNavigateTo3D = { selectedTab = 0 }
                     )
                     5 -> HardwareLabScreen(
@@ -439,12 +446,13 @@ fun PixelForgeApp(viewModel: MainViewModel) {
                 }
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "Start from a 100% blank canvas, synthesize an original asset with AI, or open the Audio & Cold Vault studio:",
+                        text = "Choose any blank-slate studio to create original 2D sprites, 3D models, textures, chiptune/cries, or AI assets from scratch:",
                         fontSize = 12.sp,
                         color = Color(0xFF94A3B8)
                     )
+                    // 1. Blank 2D Sprite / Animation Sheet
                     Button(
                         onClick = {
                             showCreateNewDialog = false
@@ -464,14 +472,74 @@ fun PixelForgeApp(viewModel: MainViewModel) {
                         Spacer(Modifier.width(8.dp))
                         Text("Draw Blank 2D Sprite / Animation Sheet", fontFamily = TechMono, fontSize = 11.sp)
                     }
+                    // 2. Blank 3D Model (Primitive Sculptor)
                     Button(
+                        onClick = {
+                            showCreateNewDialog = false
+                            viewModel.startNewBlank3DProject("New Original 3D Model")
+                            model3DCreateModeTrigger++
+                            showGalleriesOverlay = false
+                            selectedTab = 0
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = CyanNeon, contentColor = Color(0xFF031B26)),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("dialog_new_blank_3d_btn")
+                    ) {
+                        Icon(Icons.Default.ViewInAr, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Build Blank 3D Model (Primitive Sculptor)", fontFamily = TechMono, fontSize = 11.sp)
+                    }
+                    // 3. Brand-New Texture / Material
+                    Button(
+                        onClick = {
+                            showCreateNewDialog = false
+                            viewModel.startNewBlankTextureProject("New Original Texture", 32)
+                            textureCreateModeTrigger++
+                            showGalleriesOverlay = false
+                            selectedTab = 4
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = AmberGold, contentColor = Color(0xFF1F1300)),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("dialog_new_blank_texture_btn")
+                    ) {
+                        Icon(Icons.Default.Palette, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Create Brand-New Texture / Material", fontFamily = TechMono, fontSize = 11.sp)
+                    }
+                    // 4. Brand-New Audio Cry / Chiptune
+                    Button(
+                        onClick = {
+                            showCreateNewDialog = false
+                            audioCreateTabTrigger++
+                            showGalleriesOverlay = true
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MagentaNeon, contentColor = Color.White),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("dialog_new_audio_composer_btn")
+                    ) {
+                        Icon(Icons.Default.GraphicEq, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Compose Brand-New Audio Cry / Chiptune", fontFamily = TechMono, fontSize = 11.sp)
+                    }
+                    // 5. Generate Brand-New Asset with AI
+                    androidx.compose.material3.OutlinedButton(
                         onClick = {
                             showCreateNewDialog = false
                             forgeCreateTabTrigger++
                             showGalleriesOverlay = false
                             selectedTab = 3
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = CyanNeon, contentColor = Color(0xFF031B26)),
+                        border = BorderStroke(1.dp, CyanNeon.copy(alpha = 0.85f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = CyanNeon),
                         shape = RoundedCornerShape(10.dp),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -481,23 +549,6 @@ fun PixelForgeApp(viewModel: MainViewModel) {
                         Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
                         Text("Generate Brand-New Asset with AI", fontFamily = TechMono, fontSize = 11.sp)
-                    }
-                    androidx.compose.material3.OutlinedButton(
-                        onClick = {
-                            showCreateNewDialog = false
-                            showGalleriesOverlay = true
-                        },
-                        border = BorderStroke(1.dp, MagentaNeon.copy(alpha = 0.75f)),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MagentaNeon),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp)
-                            .testTag("dialog_open_audio_cold_vault_btn")
-                    ) {
-                        Icon(Icons.Default.GraphicEq, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Open Audio & Cold Vault Studio", fontFamily = TechMono, fontSize = 11.sp)
                     }
                 }
             },

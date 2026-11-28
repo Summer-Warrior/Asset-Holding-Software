@@ -125,7 +125,8 @@ fun AssetGalleriesOverlayScreen(
     uiState: AppUiState,
     viewModel: MainViewModel,
     onBack: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    openAudioCreateTrigger: Int = 0
 ) {
     BackHandler(onBack = onBack)
 
@@ -210,7 +211,8 @@ fun AssetGalleriesOverlayScreen(
         // First-Class Audio Vault, 8-Profile Soundchip DSP Split, 6-Stage Importer & AES-256-GCM Cold Vault
         AudioAndVaultStudioPanel(
             uiState = uiState,
-            viewModel = viewModel
+            viewModel = viewModel,
+            openCreateTabTrigger = openAudioCreateTrigger
         )
 
         // 3-Level Game -> Group -> Character Drill-Down Explorer

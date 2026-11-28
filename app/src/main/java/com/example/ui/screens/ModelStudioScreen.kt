@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.Construction
 import androidx.compose.material.icons.filled.DeveloperBoard
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.FileUpload
@@ -41,6 +42,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -69,6 +71,7 @@ import com.example.ui.components.AssetPreviewInspectorCard
 import com.example.ui.components.InspectorMode
 import com.example.ui.components.QuickAddToGalleryBar
 import com.example.ui.components.RoomAssetHistoryPanel
+import com.example.ui.components.Scratch3DModelBuilderPanel
 import com.example.ui.theme.AmberGold
 import com.example.ui.theme.CardBorder
 import com.example.ui.theme.CyanNeon
@@ -84,14 +87,23 @@ fun ModelStudioScreen(
     uiState: AppUiState,
     viewModel: MainViewModel,
     modifier: Modifier = Modifier,
+    openInCreateModeTrigger: Int = 0,
     onOpenHardwareLab: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
+    // 0 = Inspect & Import 3D, 1 = Create / Build New 3D
+    var studioMode by remember { mutableIntStateOf(0) }
     var showImportDialog by remember { mutableStateOf(false) }
     var rawObjInput by remember { mutableStateOf("") }
     var photoGridDensity by remember { mutableIntStateOf(28) }
+
+    LaunchedEffect(openInCreateModeTrigger) {
+        if (openInCreateModeTrigger > 0) {
+            studioMode = 1
+        }
+    }
 
     // 1. Unbounded 3D Model FILE Picker (.OBJ, .STL, .PLY, .GLTF, or any size file)
     val modelFileLauncher = rememberLauncherForActivityResult(
@@ -145,6 +157,55 @@ fun ModelStudioScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // 2-Option Segmented Mode Switcher: Create / Build New 3D vs Inspect & Import 3D
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            FilterChip(
+                selected = studioMode == 1,
+                onClick = { studioMode = 1 },
+                leadingIcon = {
+                    Icon(Icons.Default.Construction, contentDescription = null, modifier = Modifier.size(16.dp))
+                },
+                label = { Text("Create / Build New 3D", fontFamily = TechMono, fontSize = 11.sp) },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = EmeraldGreen,
+                    selectedLabelColor = Color(0xFF031B12),
+                    selectedLeadingIconColor = Color(0xFF031B12),
+                    containerColor = Color(0xFF0F172A),
+                    labelColor = Color.White
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("model_studio_mode_create_3d")
+            )
+            FilterChip(
+                selected = studioMode == 0,
+                onClick = { studioMode = 0 },
+                leadingIcon = {
+                    Icon(Icons.Default.ViewInAr, contentDescription = null, modifier = Modifier.size(16.dp))
+                },
+                label = { Text("Inspect & Import 3D", fontFamily = TechMono, fontSize = 11.sp) },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = CyanNeon,
+                    selectedLabelColor = Color(0xFF031B26),
+                    selectedLeadingIconColor = Color(0xFF031B26),
+                    containerColor = Color(0xFF0F172A),
+                    labelColor = Color.White
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("model_studio_mode_inspect_3d")
+            )
+        }
+
+        if (studioMode == 1) {
+            Scratch3DModelBuilderPanel(
+                uiState = uiState,
+                viewModel = viewModel
+            )
+        } else {
         // Preset Model Switcher Chips
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -508,6 +569,7 @@ fun ModelStudioScreen(
             onSelectReadingLevel = { viewModel.setReadingLevelMode(it) },
             onCopiedMessage = { viewModel.postStatusMessage(it) }
         )
+        }
     }
 
     // Universal Import 3D Model Dialog (Files, Photos, or Raw .OBJ / .STL / .PLY Text)

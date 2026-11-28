@@ -45,6 +45,7 @@ import com.example.data.local.MeshDiskStorage
 import com.example.data.local.PixelForgeDatabase
 import com.example.model.audio.AudioAssetEntry
 import com.example.model.audio.AudioAssetFormat
+import com.example.model.audio.AudioLoopPoints
 import com.example.model.audio.AudioSynthAndDspEngine
 import com.example.model.audio.AudioUsageCategory
 import com.example.model.audio.ProceduralCrySpec
@@ -76,7 +77,11 @@ import com.example.model.masterpack.RigMetadata
 import com.example.model.masterpack.ThreeMapRecolorEngine
 import com.example.model.model3d.Mesh3D
 import com.example.model.model3d.ObjParser
+import com.example.model.model3d.PrimitiveShapeType
 import com.example.model.model3d.ProceduralMeshes
+import com.example.model.model3d.Scratch3DBuilderEngine
+import com.example.model.model3d.Scratch3DPart
+import com.example.model.model3d.Scratch3DProject
 import com.example.model.sprite.PixelDrawTool
 import com.example.model.sprite.SampleSpriteSheets
 import com.example.model.sprite.ScratchSpriteProject
@@ -89,7 +94,10 @@ import com.example.model.suite.NamedCharacterFusionGroup
 import com.example.model.suite.StagedCharacterAsset
 import com.example.model.suite.SuiteBuildConfig
 import com.example.model.suite.UnifiedAssetSuite
+import com.example.model.texture.ProceduralMaterialPattern
 import com.example.model.texture.ProceduralTextures
+import com.example.model.texture.ScratchTextureEngine
+import com.example.model.texture.ScratchTextureProject
 import com.example.model.texture.TexturePreset
 import com.example.model.vault.ColdVaultEndpointConfig
 import com.example.model.vault.EncryptedColdVaultManager
@@ -221,7 +229,12 @@ data class AppUiState(
     val scratchCreateAssetName: String = "",
     val isCreatingFromScratchWithAi: Boolean = false,
     val lastScratchAiCreationBitmap: Bitmap? = null,
-    val lastScratchAiError: String? = null
+    val lastScratchAiError: String? = null,
+    // From-Scratch 3D Primitive Kitbash Builder & From-Scratch Texture Painter
+    val scratch3DProject: Scratch3DProject = Scratch3DBuilderEngine.createEmptyProject("New Original 3D Model"),
+    val scratchTextureProject: ScratchTextureProject = ScratchTextureEngine.createBlankTexture("New Original Texture", 32),
+    val activeTextureBrushColorInt: Int = Color.rgb(0x00, 0xE5, 0xFF),
+    val activeTextureBrushSizePx: Int = 1
 )
 
 class MainViewModel(
@@ -4319,6 +4332,421 @@ class MainViewModel(
                         statusMessage = msg
                     )
                 }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Creator Upgrade B: From-Scratch 3D Primitive / Kitbash Model Builder
+    // -------------------------------------------------------------------------
+
+    fun startNewBlank3DProject(name: String = "New Original 3D Model") {
+        val blank = Scratch3DBuilderEngine.createEmptyProject(name)
+        _uiState.update { state ->
+            state.copy(
+                scratch3DProject = blank,
+                statusMessage = "Started blank 3D scene '${blank.name}' (0 parts). Tap any shape to start building."
+            )
+        }
+    }
+
+    fun updateScratch3DProjectName(name: String) {
+        _uiState.update { state ->
+            state.copy(
+                scratch3DProject = state.scratch3DProject.copy(name = name)
+            )
+        }
+    }
+
+    fun addScratch3DPart(shape: PrimitiveShapeType) {
+        val colorPalette = longArrayOf(
+            0xFF00E5FF,
+            0xFFFF2A85,
+            0xFF10B981,
+            0xFFF59E0B,
+            0xFF8B5CF6,
+            0xFF38BDF8,
+            0xFFE2E8F0
+        )
+        _uiState.update { state ->
+            val nextColor = colorPalette[state.scratch3DProject.parts.size % colorPalette.size]
+            val updated = Scratch3DBuilderEngine.addPart(
+                project = state.scratch3DProject,
+                shape = shape,
+                colorLong = nextColor
+            )
+            state.copy(
+                scratch3DProject = updated,
+                statusMessage = "Added ${shape.label} to '${updated.name}' (${updated.parts.size} part${if (updated.parts.size == 1) "" else "s"})."
+            )
+        }
+    }
+
+    fun selectScratch3DPart(partId: String) {
+        _uiState.update { state ->
+            if (state.scratch3DProject.parts.none { it.id == partId }) return@update state
+            state.copy(
+                scratch3DProject = state.scratch3DProject.copy(selectedPartId = partId)
+            )
+        }
+    }
+
+    fun updateSelectedScratch3DPart(transform: (Scratch3DPart) -> Scratch3DPart) {
+        _uiState.update { state ->
+            val updated = Scratch3DBuilderEngine.updateSelectedPart(state.scratch3DProject, transform)
+            state.copy(scratch3DProject = updated)
+        }
+    }
+
+    fun duplicateSelectedScratch3DPart() {
+        _uiState.update { state ->
+            if (state.scratch3DProject.selectedPart == null) {
+                return@update state.copy(statusMessage = "Add and select a 3D part before duplicating.")
+            }
+            val updated = Scratch3DBuilderEngine.duplicateSelectedPart(state.scratch3DProject)
+            state.copy(
+                scratch3DProject = updated,
+                statusMessage = "Duplicated selected part (${updated.parts.size} parts total)."
+            )
+        }
+    }
+
+    fun deleteSelectedScratch3DPart() {
+        _uiState.update { state ->
+            if (state.scratch3DProject.selectedPart == null) {
+                return@update state.copy(statusMessage = "No 3D part selected to delete.")
+            }
+            val updated = Scratch3DBuilderEngine.deleteSelectedPart(state.scratch3DProject)
+            state.copy(
+                scratch3DProject = updated,
+                statusMessage = "Deleted 3D part (${updated.parts.size} part${if (updated.parts.size == 1) "" else "s"} remaining)."
+            )
+        }
+    }
+
+    fun commitScratch3DProjectToStudioAndVault() {
+        val snapshot = _uiState.value
+        val project = snapshot.scratch3DProject
+        if (project.parts.isEmpty()) {
+            postStatusMessage("Add at least 1 3D shape before baking & saving your model.")
+            return
+        }
+
+        val compiledMesh = Scratch3DBuilderEngine.compileProjectToMesh3D(project)
+        val activeGame = snapshot.activeGameTagForImports.ifBlank { "General Studio" }
+        val activeGroup = snapshot.activeGroupTagForImports.ifBlank { "Core Roster" }
+        val activeChar = compiledMesh.name.ifBlank { "New Original 3D Model" }
+        val metrics = "${compiledMesh.vertexCount}v / ${compiledMesh.faceCount}f • ${project.parts.size} parts"
+
+        val savedLibEntry = SavedLibraryAsset(
+            id = "lib_scratch3d_${System.currentTimeMillis()}",
+            title = compiledMesh.name,
+            characterTag = activeChar,
+            gameTag = activeGame,
+            groupTag = activeGroup,
+            type = LibraryAssetType.MODEL_3D,
+            mesh = compiledMesh,
+            hardwareBadge = snapshot.selectedHardware.shortName,
+            metricsSummary = metrics,
+            sourceBadge = "SCRATCH 3D",
+            formatSummary = compiledMesh.sourceFormat
+        )
+
+        val historyEntity = AssetHistoryEntity.fromStudioAssets(
+            title = compiledMesh.name,
+            characterTag = activeChar,
+            assetType = "MODEL_3D",
+            sourceOrigin = "SCRATCH 3D BUILDER",
+            hardwareTarget = snapshot.selectedHardware.shortName,
+            metricsSummary = metrics,
+            mesh = compiledMesh,
+            gameTag = activeGame,
+            groupTag = activeGroup
+        )
+
+        _uiState.update { state ->
+            val nextHistoryId = (state.roomAssetHistory.maxOfOrNull { it.id } ?: 0L) + 1L
+            state.copy(
+                currentMesh = compiledMesh,
+                hasImportedMesh = true,
+                savedLibraryAssets = listOf(savedLibEntry) + state.savedLibraryAssets,
+                roomAssetHistory = listOf(historyEntity.copy(id = nextHistoryId)) + state.roomAssetHistory,
+                statusMessage = "Baked & saved brand-new 3D model '${compiledMesh.name}' ($metrics) to Studio, Library & Room History!"
+            )
+        }
+
+        // Persist asynchronously to Room if attached (without losing synchronous UI state)
+        val repo = historyRepository
+        if (repo != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    repo.recordGeneratedAsset(historyEntity)
+                    val dbRows = repo.getAllHistorySnapshot()
+                    if (dbRows.isNotEmpty()) {
+                        _uiState.update { it.copy(roomAssetHistory = dbRows) }
+                    }
+                } catch (e: Exception) {
+                    Log.w("MainViewModel", "Room persistence skipped for scratch 3D mesh: ${e.message}")
+                }
+            }
+        }
+
+        // Stage under active Game -> Group -> Character pool using the brand-new model's own identity
+        registerAssetAndAutoFuseIfMatched(
+            StagedCharacterAsset(
+                id = "staged_scratch3d_${System.currentTimeMillis()}",
+                assetTitle = compiledMesh.name,
+                characterName = activeChar,
+                modality = CharacterAssetModality.MESH_3D,
+                isUserImported = true,
+                mesh = compiledMesh,
+                gameTag = activeGame,
+                groupTag = activeGroup
+            )
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // Creator Upgrade B: From-Scratch Texture Painter & Material Generator
+    // -------------------------------------------------------------------------
+
+    fun startNewBlankTextureProject(name: String = "New Original Texture", sizePx: Int = 32) {
+        val blank = ScratchTextureEngine.createBlankTexture(name = name, sizePx = sizePx)
+        _uiState.update { state ->
+            state.copy(
+                scratchTextureProject = blank,
+                statusMessage = "Started blank ${blank.sizePx}×${blank.sizePx}px texture canvas '${blank.name}'."
+            )
+        }
+    }
+
+    fun updateScratchTextureName(name: String) {
+        _uiState.update { state ->
+            state.copy(
+                scratchTextureProject = state.scratchTextureProject.copy(name = name)
+            )
+        }
+    }
+
+    fun generateScratchTexturePattern(
+        pattern: ProceduralMaterialPattern,
+        primaryColorInt: Int,
+        secondaryColorInt: Int,
+        accentColorInt: Int
+    ) {
+        _uiState.update { state ->
+            val current = state.scratchTextureProject
+            val generated = ScratchTextureEngine.generateMaterialPattern(
+                name = current.name.ifBlank { "New ${pattern.label} Texture" },
+                sizePx = current.sizePx,
+                pattern = pattern,
+                primaryColorInt = primaryColorInt,
+                secondaryColorInt = secondaryColorInt,
+                accentColorInt = accentColorInt
+            ).copy(
+                mirrorX = current.mirrorX,
+                mirrorY = current.mirrorY
+            )
+            state.copy(
+                scratchTextureProject = generated,
+                statusMessage = "Generated '${pattern.label}' procedural material on ${generated.sizePx}×${generated.sizePx}px canvas."
+            )
+        }
+    }
+
+    fun setTextureBrushColorInt(colorInt: Int) {
+        _uiState.update { it.copy(activeTextureBrushColorInt = colorInt) }
+    }
+
+    fun setTextureBrushSizePx(size: Int) {
+        _uiState.update { it.copy(activeTextureBrushSizePx = size.coerceIn(1, 3)) }
+    }
+
+    fun toggleScratchTextureMirrorX() {
+        _uiState.update { state ->
+            val next = !state.scratchTextureProject.mirrorX
+            state.copy(
+                scratchTextureProject = state.scratchTextureProject.copy(mirrorX = next),
+                statusMessage = if (next) "Texture Mirror X enabled." else "Texture Mirror X disabled."
+            )
+        }
+    }
+
+    fun toggleScratchTextureMirrorY() {
+        _uiState.update { state ->
+            val next = !state.scratchTextureProject.mirrorY
+            state.copy(
+                scratchTextureProject = state.scratchTextureProject.copy(mirrorY = next),
+                statusMessage = if (next) "Texture Mirror Y enabled." else "Texture Mirror Y disabled."
+            )
+        }
+    }
+
+    fun paintScratchTextureAt(x: Int, y: Int) {
+        _uiState.update { state ->
+            val updated = ScratchTextureEngine.paintTexturePixel(
+                project = state.scratchTextureProject,
+                x = x,
+                y = y,
+                colorInt = state.activeTextureBrushColorInt,
+                brushSize = state.activeTextureBrushSizePx
+            )
+            state.copy(scratchTextureProject = updated)
+        }
+    }
+
+    fun commitScratchTextureTo3DStudio() {
+        val snapshot = _uiState.value
+        val project = snapshot.scratchTextureProject
+        val exportBmp = ScratchTextureEngine.toExportBitmap(project, outputDim = 128)
+        val cleanName = project.name.trim().ifBlank { "New Original Texture" }
+        val activeGame = snapshot.activeGameTagForImports.ifBlank { "General Studio" }
+        val activeGroup = snapshot.activeGroupTagForImports.ifBlank { "Core Roster" }
+        val activeChar = cleanName
+
+        _uiState.update { state ->
+            state.copy(
+                activeTexture = exportBmp,
+                activeTextureName = cleanName,
+                hasImportedTexture = true,
+                statusMessage = "Applied brand-new 128×128 texture '$cleanName' to 3D Studio & staged to Vault!"
+            )
+        }
+
+        registerAssetAndAutoFuseIfMatched(
+            StagedCharacterAsset(
+                id = "staged_scratchtex_${System.currentTimeMillis()}",
+                assetTitle = cleanName,
+                characterName = activeChar,
+                modality = CharacterAssetModality.TEXTURE_UV,
+                isUserImported = true,
+                bitmap = exportBmp,
+                gameTag = activeGame,
+                groupTag = activeGroup
+            )
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // Creator Upgrade B: From-Scratch Audio Cry Designer & 16-Step Sequencer
+    // -------------------------------------------------------------------------
+
+    fun saveBrandNewCryToAudioVault(
+        title: String,
+        slotKey: String,
+        spec: ProceduralCrySpec
+    ) {
+        val cleanTitle = title.trim().ifBlank { "Original Cry" }
+        val cleanSlot = sanitizeAssetSlug(slotKey.ifBlank { cleanTitle }, "cry_custom")
+        val normalizedSpec = spec.copy(speciesKey = cleanSlot)
+        val sampleRate = 22050
+        val pcm = AudioSynthAndDspEngine.synthesizeProceduralCryPcm(normalizedSpec, sampleRateHz = sampleRate)
+        val peaks = AudioSynthAndDspEngine.computeWaveformPeaks(pcm, bucketCount = 48)
+        val jsonBytes = normalizedSpec.toJsonString().toByteArray(Charsets.UTF_8)
+        val snapshot = _uiState.value
+
+        val newEntry = AudioAssetEntry(
+            id = "audio_cry_${System.currentTimeMillis()}_${cleanSlot.take(10)}",
+            slotKey = cleanSlot,
+            title = cleanTitle,
+            category = AudioUsageCategory.PROCEDURAL_CRY,
+            format = AudioAssetFormat.AUDIO_CUE_JSON,
+            sampleRateHz = sampleRate,
+            durationMs = normalizedSpec.durationMs,
+            waveformPeaks = peaks,
+            byteSize = jsonBytes.size.toLong(),
+            gameTag = snapshot.activeGameTagForImports.ifBlank { "General Studio" },
+            groupTag = "Audio & SFX",
+            characterTag = cleanTitle,
+            crySpec = normalizedSpec
+        )
+
+        _uiState.update { state ->
+            state.copy(
+                audioVaultEntries = listOf(newEntry) + state.audioVaultEntries,
+                selectedAudioEntryId = newEntry.id,
+                statusMessage = "Saved brand-new procedural cry '$cleanTitle' (slot '$cleanSlot') to Audio Vault!"
+            )
+        }
+    }
+
+    fun saveBrandNewSequenceToAudioVault(
+        title: String,
+        slotKey: String,
+        spec: ScoreSequenceSpec
+    ) {
+        val cleanTitle = title.trim().ifBlank { "Original Chiptune Loop" }
+        val cleanSlot = sanitizeAssetSlug(slotKey.ifBlank { cleanTitle }, "bgm_custom")
+        val normalizedSpec = spec.copy(title = cleanTitle)
+        val sampleRate = 22050
+        val pcm = AudioSynthAndDspEngine.synthesizeScoreSequencePcm(normalizedSpec, sampleRateHz = sampleRate)
+        val peaks = AudioSynthAndDspEngine.computeWaveformPeaks(pcm, bucketCount = 48)
+        val durationMs = ((pcm.size.toDouble() / sampleRate.toDouble()) * 1000.0)
+            .let { kotlin.math.round(it).toInt() }
+            .coerceAtLeast(100)
+        val jsonBytes = normalizedSpec.toJsonString().toByteArray(Charsets.UTF_8)
+        val snapshot = _uiState.value
+
+        val newEntry = AudioAssetEntry(
+            id = "audio_seq_${System.currentTimeMillis()}_${cleanSlot.take(10)}",
+            slotKey = cleanSlot,
+            title = cleanTitle,
+            category = AudioUsageCategory.BGM_LOOP,
+            format = AudioAssetFormat.SCORE_SEQ_JSON,
+            sampleRateHz = sampleRate,
+            durationMs = durationMs,
+            loopPoints = AudioLoopPoints(
+                loopStartSample = 0,
+                loopEndSample = pcm.size,
+                loopEnabled = true
+            ),
+            waveformPeaks = peaks,
+            byteSize = jsonBytes.size.toLong(),
+            gameTag = snapshot.activeGameTagForImports.ifBlank { "General Studio" },
+            groupTag = "Audio & SFX",
+            characterTag = cleanTitle,
+            scoreSpec = normalizedSpec
+        )
+
+        _uiState.update { state ->
+            state.copy(
+                audioVaultEntries = listOf(newEntry) + state.audioVaultEntries,
+                selectedAudioEntryId = newEntry.id,
+                statusMessage = "Saved brand-new chiptune track '$cleanTitle' (${normalizedSpec.bpm} BPM, ${normalizedSpec.notes.size} notes) to Audio Vault!"
+            )
+        }
+    }
+
+    fun auditionCustomCrySpecWithDsp(spec: ProceduralCrySpec) {
+        val profile = _uiState.value.selectedSoundchipProfile
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val basePcm = AudioSynthAndDspEngine.synthesizeProceduralCryPcm(spec, sampleRateHz = 22050)
+                val dspPcm = AudioSynthAndDspEngine.applyHardwareSoundchipDsp(basePcm, 22050, profile)
+                AudioSynthAndDspEngine.playPcmSafely(dspPcm, sampleRateHz = 22050)
+                postStatusMessage("Auditioning custom cry through ${profile.displayName} DSP...")
+            } catch (e: Exception) {
+                Log.w("MainViewModel", "Failed to audition custom cry: ${e.message}")
+                postStatusMessage("Unable to audition cry: ${e.message}")
+            }
+        }
+    }
+
+    fun auditionCustomScoreSpecWithDsp(spec: ScoreSequenceSpec) {
+        val profile = _uiState.value.selectedSoundchipProfile
+        if (spec.notes.isEmpty()) {
+            postStatusMessage("Tap at least one step on the 16-step grid to audition your sequence.")
+            return
+        }
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val basePcm = AudioSynthAndDspEngine.synthesizeScoreSequencePcm(spec, sampleRateHz = 22050)
+                val dspPcm = AudioSynthAndDspEngine.applyHardwareSoundchipDsp(basePcm, 22050, profile)
+                AudioSynthAndDspEngine.playPcmSafely(dspPcm, sampleRateHz = 22050)
+                postStatusMessage("Auditioning custom ${spec.bpm} BPM sequence through ${profile.displayName} DSP...")
+            } catch (e: Exception) {
+                Log.w("MainViewModel", "Failed to audition custom sequence: ${e.message}")
+                postStatusMessage("Unable to audition sequence: ${e.message}")
             }
         }
     }
