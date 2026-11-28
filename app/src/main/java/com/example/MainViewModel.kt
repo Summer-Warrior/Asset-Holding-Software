@@ -9,7 +9,9 @@ import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.ai.AiBuildTargetKind
 import com.example.ai.AiImportSpriteSheetReviewer
+import com.example.ai.AiMultiAssetBuilder
 import com.example.ai.AiProviderProfile
 import com.example.ai.AiProviderType
 import com.example.ai.AiSpriteSheetReviewResult
@@ -244,7 +246,10 @@ data class AppUiState(
     val lastAiAutoRepairNote: String? = null,
     // BYOS (Bring-Your-Own-Storage) Personal Cloud / SAF Folder Workspace
     val byosWorkspaceConfig: ByosWorkspaceConfig = ByosWorkspaceConfig(),
-    val lastByosSyncReport: ByosSyncReport? = null
+    val lastByosSyncReport: ByosSyncReport? = null,
+    // AI Multi-Asset Builder (2D Sprite, 3D Model Blueprint, Texture, Audio Cry, 16-Step Chiptune)
+    val selectedAiBuildTarget: AiBuildTargetKind = AiBuildTargetKind.SPRITE_2D,
+    val lastAiBuildSummary: String? = null
 )
 
 class MainViewModel(
@@ -4351,6 +4356,7 @@ class MainViewModel(
                         currentMesh = result.extrudedMeshOrNull ?: state.currentMesh,
                         activeRigMetadata = updatedRig,
                         savedLibraryAssets = listOf(savedEntry) + state.savedLibraryAssets,
+                        lastAiBuildSummary = "Built 2D sprite '${result.title}' (${result.spriteSheet.frames.size}f, key ${result.chromaKeyHex}) via ${result.modelUsed}$auditMetricsTag — open Sprite Studio to inspect or edit.",
                         statusMessage = "Created '${result.title}' from scratch via ${result.modelUsed} (${result.spriteSheet.frames.size}f, key ${result.chromaKeyHex}$auditMetricsTag)!"
                     )
                 }
@@ -4929,6 +4935,268 @@ class MainViewModel(
                 lastByosSyncReport = null,
                 statusMessage = "Disconnected personal SAF workspace folder."
             )
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // AI Multi-Asset Builder (3D Models, Custom Textures, Audio Cries & Chiptunes)
+    // -------------------------------------------------------------------------
+
+    fun selectAiBuildTarget(target: AiBuildTargetKind) {
+        _uiState.update { state ->
+            state.copy(
+                selectedAiBuildTarget = target,
+                lastScratchAiError = null
+            )
+        }
+    }
+
+    fun buildBrandNewAssetWithAi(alsoExtrude3D: Boolean = false) {
+        val snapshot = _uiState.value
+        val target = snapshot.selectedAiBuildTarget
+        if (target == AiBuildTargetKind.SPRITE_2D) {
+            createBrandNewAssetFromScratchWithAi(alsoExtrude3D = alsoExtrude3D)
+            return
+        }
+
+        val subject = snapshot.promptText.trim()
+        if (subject.isBlank()) {
+            _uiState.update {
+                it.copy(
+                    lastScratchAiError = "Enter a description before building a brand-new ${target.label} with AI.",
+                    statusMessage = "Describe your ${target.label} first."
+                )
+            }
+            return
+        }
+
+        val assetName = snapshot.scratchCreateAssetName.trim()
+        val activeGame = snapshot.activeGameTagForImports.ifBlank { "General Studio" }
+        val activeGroup = snapshot.activeGroupTagForImports.ifBlank { "Core Roster" }
+        val activeChar = assetName.ifBlank {
+            subject.split(Regex("\\s+")).take(3).joinToString(" ")
+                .replaceFirstChar { it.uppercase() }
+                .ifBlank { "Original Creation" }
+        }
+        val sharedContextBlock = OmniAiRouter.getContextRegistry().assembleContextBlock(
+            queryHint = subject,
+            activeProjectSummary = buildActiveProjectContextSummary(snapshot)
+        )
+
+        _uiState.update {
+            it.copy(
+                isCreatingFromScratchWithAi = true,
+                lastScratchAiError = null,
+                statusMessage = "Building brand-new ${target.label} from scratch with AI..."
+            )
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                when (target) {
+                    AiBuildTargetKind.MODEL_3D -> {
+                        val built = AiMultiAssetBuilder.build3DModelFromPrompt(
+                            assetName = assetName,
+                            subjectDescription = subject,
+                            sharedContextBlock = sharedContextBlock
+                        )
+                        val mesh = built.compiledMesh
+                        val metrics = "${mesh.vertexCount}v/${mesh.faceCount}f • ${built.project.parts.size} parts • ${built.modelUsed}"
+                        val savedEntry = SavedLibraryAsset(
+                            id = "lib_ai3d_${System.currentTimeMillis()}",
+                            title = mesh.name,
+                            characterTag = activeChar,
+                            gameTag = activeGame,
+                            groupTag = activeGroup,
+                            type = LibraryAssetType.MODEL_3D,
+                            mesh = mesh,
+                            hardwareBadge = snapshot.selectedHardware.shortName,
+                            metricsSummary = metrics,
+                            sourceBadge = "AI BUILT 3D",
+                            formatSummary = built.modelUsed
+                        )
+                        val summary = "Built ${built.project.parts.size}-part editable 3D model '${mesh.name}' (${mesh.vertexCount}v/${mesh.faceCount}f) via ${built.modelUsed} — open 3D Builder to tweak any part."
+                        _uiState.update { state ->
+                            state.copy(
+                                isCreatingFromScratchWithAi = false,
+                                lastScratchAiError = null,
+                                scratch3DProject = built.project,
+                                currentMesh = mesh,
+                                hasImportedMesh = true,
+                                savedLibraryAssets = listOf(savedEntry) + state.savedLibraryAssets,
+                                lastAiBuildSummary = summary,
+                                statusMessage = summary
+                            )
+                        }
+                        recordAssetInRoomHistory(
+                            title = mesh.name,
+                            characterTag = activeChar,
+                            assetType = "MODEL_3D",
+                            sourceOrigin = "AI BUILT 3D",
+                            hardwareTarget = snapshot.selectedHardware.shortName,
+                            metricsSummary = metrics,
+                            mesh = mesh,
+                            gameTag = activeGame,
+                            groupTag = activeGroup
+                        )
+                        registerAssetAndAutoFuseIfMatched(
+                            StagedCharacterAsset(
+                                id = "staged_ai3d_${System.currentTimeMillis()}",
+                                assetTitle = mesh.name,
+                                characterName = activeChar,
+                                modality = CharacterAssetModality.MESH_3D,
+                                isUserImported = true,
+                                mesh = mesh,
+                                gameTag = activeGame,
+                                groupTag = activeGroup
+                            )
+                        )
+                    }
+
+                    AiBuildTargetKind.TEXTURE_MATERIAL -> {
+                        val built = AiMultiAssetBuilder.buildTextureFromPrompt(
+                            assetName = assetName,
+                            subjectDescription = subject,
+                            sizePx = 32,
+                            sharedContextBlock = sharedContextBlock
+                        )
+                        val texTitle = built.project.name
+                        val summary = "Built ${built.project.sizePx}×${built.project.sizePx} editable texture '$texTitle' (128×128 UV applied) via ${built.modelUsed} — open Texture Studio to paint or tweak."
+                        _uiState.update { state ->
+                            state.copy(
+                                isCreatingFromScratchWithAi = false,
+                                lastScratchAiError = null,
+                                scratchTextureProject = built.project,
+                                activeTexture = built.exportBitmap,
+                                activeTextureName = texTitle,
+                                hasImportedTexture = true,
+                                lastAiBuildSummary = summary,
+                                statusMessage = summary
+                            )
+                        }
+                        registerAssetAndAutoFuseIfMatched(
+                            StagedCharacterAsset(
+                                id = "staged_aitex_${System.currentTimeMillis()}",
+                                assetTitle = texTitle,
+                                characterName = activeChar,
+                                modality = CharacterAssetModality.TEXTURE_UV,
+                                isUserImported = true,
+                                bitmap = built.exportBitmap,
+                                gameTag = activeGame,
+                                groupTag = activeGroup
+                            )
+                        )
+                    }
+
+                    AiBuildTargetKind.AUDIO_CRY -> {
+                        val built = AiMultiAssetBuilder.buildAudioCryFromPrompt(
+                            assetName = assetName,
+                            subjectDescription = subject,
+                            sharedContextBlock = sharedContextBlock
+                        )
+                        val cryTitle = assetName.ifBlank {
+                            built.spec.speciesKey.replace('_', ' ').replaceFirstChar { it.uppercase() }
+                        }
+                        val slotKey = "cry_${built.spec.speciesKey}"
+                        val entry = AudioAssetEntry(
+                            id = "audio_aicry_${System.currentTimeMillis()}",
+                            slotKey = slotKey,
+                            title = cryTitle,
+                            category = AudioUsageCategory.PROCEDURAL_CRY,
+                            format = AudioAssetFormat.AUDIO_CUE_JSON,
+                            sampleRateHz = built.sampleRateHz,
+                            durationMs = built.spec.durationMs,
+                            waveformPeaks = built.waveformPeaks,
+                            filePath = "",
+                            sha256Hex = "",
+                            byteSize = built.rawJson.toByteArray().size.toLong(),
+                            gameTag = activeGame,
+                            groupTag = activeGroup,
+                            characterTag = activeChar,
+                            crySpec = built.spec
+                        )
+                        val dspProfile = _uiState.value.selectedSoundchipProfile
+                        val dspPcm = AudioSynthAndDspEngine.applyHardwareSoundchipDsp(
+                            built.pcm,
+                            built.sampleRateHz,
+                            dspProfile
+                        )
+                        AudioSynthAndDspEngine.playPcmSafely(dspPcm, built.sampleRateHz)
+
+                        val summary = "Built procedural cry '$cryTitle' (${built.spec.baseFreqHz.roundToInt()}→${built.spec.endFreqHz.roundToInt()} Hz, ${built.spec.durationMs}ms) via ${built.modelUsed} and auditioned on ${dspProfile.displayName}."
+                        _uiState.update { state ->
+                            state.copy(
+                                isCreatingFromScratchWithAi = false,
+                                lastScratchAiError = null,
+                                audioVaultEntries = listOf(entry) + state.audioVaultEntries,
+                                selectedAudioEntryId = entry.id,
+                                lastAiBuildSummary = summary,
+                                statusMessage = summary
+                            )
+                        }
+                    }
+
+                    AiBuildTargetKind.AUDIO_CHIPTUNE -> {
+                        val built = AiMultiAssetBuilder.buildChiptuneFromPrompt(
+                            assetName = assetName,
+                            subjectDescription = subject,
+                            sharedContextBlock = sharedContextBlock
+                        )
+                        val trackTitle = built.spec.title
+                        val slotSlug = trackTitle.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').ifBlank { "ai_chiptune" }
+                        val durationMs = ((built.pcm.size.toDouble() / built.sampleRateHz.toDouble()) * 1000.0).roundToInt().coerceAtLeast(250)
+                        val entry = AudioAssetEntry(
+                            id = "audio_aichip_${System.currentTimeMillis()}",
+                            slotKey = "bgm_$slotSlug",
+                            title = trackTitle,
+                            category = AudioUsageCategory.BGM_LOOP,
+                            format = AudioAssetFormat.SCORE_SEQ_JSON,
+                            sampleRateHz = built.sampleRateHz,
+                            durationMs = durationMs,
+                            waveformPeaks = built.waveformPeaks,
+                            filePath = "",
+                            sha256Hex = "",
+                            byteSize = built.rawJson.toByteArray().size.toLong(),
+                            gameTag = activeGame,
+                            groupTag = activeGroup,
+                            characterTag = activeChar,
+                            scoreSpec = built.spec
+                        )
+                        val dspProfile = _uiState.value.selectedSoundchipProfile
+                        val dspPcm = AudioSynthAndDspEngine.applyHardwareSoundchipDsp(
+                            built.pcm,
+                            built.sampleRateHz,
+                            dspProfile
+                        )
+                        AudioSynthAndDspEngine.playPcmSafely(dspPcm, built.sampleRateHz)
+
+                        val summary = "Composed 16-step chiptune '$trackTitle' (${built.spec.bpm} BPM, ${built.spec.notes.size} notes) via ${built.modelUsed} and auditioned on ${dspProfile.displayName}."
+                        _uiState.update { state ->
+                            state.copy(
+                                isCreatingFromScratchWithAi = false,
+                                lastScratchAiError = null,
+                                audioVaultEntries = listOf(entry) + state.audioVaultEntries,
+                                selectedAudioEntryId = entry.id,
+                                lastAiBuildSummary = summary,
+                                statusMessage = summary
+                            )
+                        }
+                    }
+
+                    AiBuildTargetKind.SPRITE_2D -> Unit
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "AI multi-asset build failed for ${target.name}", e)
+                val msg = e.localizedMessage
+                    ?: "AI ${target.label} build failed. Check your connected provider in Omni-AI Hub."
+                _uiState.update { state ->
+                    state.copy(
+                        isCreatingFromScratchWithAi = false,
+                        lastScratchAiError = msg,
+                        statusMessage = msg
+                    )
+                }
+            }
         }
     }
 

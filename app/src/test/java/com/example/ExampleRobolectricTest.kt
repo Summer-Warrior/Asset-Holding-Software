@@ -2544,6 +2544,185 @@ class ExampleRobolectricTest {
       tempRoot.deleteRecursively()
     }
   }
+
+  @Test
+  fun `test ai multi asset builder parses 3d blueprint texture cry and chiptune json safely`() {
+    val builder = com.example.ai.AiMultiAssetBuilder
+
+    // 1. Markdown-fenced 3D blueprint JSON with 3 parts (including mirrored WEDGE_WING & out-of-bounds values)
+    val fenced3DJson = """
+      Here is your 3D blueprint:
+      ```json
+      {
+        "title": "Cyber Dragon Mech",
+        "parts": [
+          {
+            "name": "Armored Torso",
+            "shape": "BOX",
+            "posX": 0.0, "posY": 0.0, "posZ": 0.0,
+            "scaleX": 5.0, "scaleY": 0.85, "scaleZ": 0.6,
+            "rotYDeg": 740.0,
+            "colorHex": "#1E293B",
+            "mirrorX": false
+          },
+          {
+            "name": "Dragon Helm",
+            "shape": "CONE",
+            "posX": 0.0, "posY": 9.5, "posZ": 0.1,
+            "scaleX": 0.01, "scaleY": 0.55, "scaleZ": 0.5,
+            "rotYDeg": 0.0,
+            "colorHex": "#00E5FF",
+            "mirrorX": false
+          },
+          {
+            "name": "Plasma Wing",
+            "shape": "WEDGE_WING",
+            "posX": 0.7, "posY": 0.2, "posZ": -0.1,
+            "scaleX": 0.9, "scaleY": 0.25, "scaleZ": 0.65,
+            "rotYDeg": -30.0,
+            "colorHex": "#FF2A85",
+            "mirrorX": true
+          }
+        ]
+      }
+      ```
+    """.trimIndent()
+
+    val project3D = builder.parse3DBlueprintJson("Cyber Dragon Mech", fenced3DJson)
+    assertEquals("Cyber Dragon Mech", project3D.name)
+    assertEquals(3, project3D.parts.size)
+    // Confirm strict clamping
+    assertEquals(1.8f, project3D.parts[0].scaleX, 0.001f)
+    assertEquals(20.0f, project3D.parts[0].rotYDeg, 0.001f)
+    assertEquals(1.5f, project3D.parts[1].posY, 0.001f)
+    assertEquals(0.1f, project3D.parts[1].scaleX, 0.001f)
+    assertTrue(project3D.parts[2].mirrorX)
+    assertEquals(330.0f, project3D.parts[2].rotYDeg, 0.001f)
+
+    val compiledMesh = com.example.model.model3d.Scratch3DBuilderEngine.compileProjectToMesh3D(project3D)
+    assertTrue("Compiled 3D blueprint must have vertices", compiledMesh.vertices.isNotEmpty())
+    assertTrue("Compiled 3D blueprint must have faces", compiledMesh.faces.isNotEmpty())
+
+    // Malformed / empty parts JSON must throw IllegalArgumentException (never silent stock fallback!)
+    var threwOnEmpty = false
+    try {
+      builder.parse3DBlueprintJson("Broken", """{"parts": []}""")
+    } catch (_: IllegalArgumentException) {
+      threwOnEmpty = true
+    }
+    assertTrue("Empty 3D blueprint JSON must throw IllegalArgumentException", threwOnEmpty)
+
+    var threwOnGarbage = false
+    try {
+      builder.parse3DBlueprintJson("Broken", "not json at all")
+    } catch (_: IllegalArgumentException) {
+      threwOnGarbage = true
+    }
+    assertTrue("Non-JSON 3D blueprint must throw IllegalArgumentException", threwOnGarbage)
+
+    // 2. Texture recipe JSON -> editable ScratchTextureProject & 128x128 bitmap
+    val textureJson = """
+      ```json
+      {
+        "title": "Obsidian Mana Plate",
+        "pattern": "ENERGY_CIRCUIT",
+        "primaryHex": "#0F172A",
+        "secondaryHex": "#1E293B",
+        "accentHex": "#00E5FF",
+        "mirrorX": true,
+        "mirrorY": false,
+        "pixelAccents": [
+          {"x": 4, "y": 4, "hex": "#FACC15"},
+          {"x": 999, "y": -5, "hex": "#FF2A85"}
+        ]
+      }
+      ```
+    """.trimIndent()
+    val texProject = builder.parseTextureRecipeJson("Obsidian Mana Plate", textureJson, sizePx = 32)
+    assertEquals(32, texProject.sizePx)
+    assertTrue(texProject.mirrorX)
+    val texBmp = com.example.model.texture.ScratchTextureEngine.toExportBitmap(texProject, outputDim = 128)
+    assertEquals(128, texBmp.width)
+    assertEquals(128, texBmp.height)
+
+    // 3. Procedural Cry JSON -> clamped ProceduralCrySpec & valid non-empty PCM
+    val cryJson = """
+      {
+        "speciesKey": "crystal_phoenix",
+        "baseFreqHz": 5000.0,
+        "endFreqHz": 12.0,
+        "durationMs": 420,
+        "modulationHz": 24.0,
+        "noiseMix": 0.25
+      }
+    """.trimIndent()
+    val crySpec = builder.parseCrySpecJson("crystal_phoenix", cryJson)
+    assertEquals(2000f, crySpec.baseFreqHz, 0.01f)
+    assertEquals(80f, crySpec.endFreqHz, 0.01f)
+    val cryPcm = com.example.model.audio.AudioSynthAndDspEngine.synthesizeProceduralCryPcm(crySpec, 22050)
+    assertTrue("Cry PCM must be non-empty", cryPcm.isNotEmpty())
+    assertTrue("Cry PCM must contain audible amplitude", cryPcm.any { kotlin.math.abs(it.toInt()) > 100 })
+
+    // 4. 16-Step Chiptune JSON -> clamped ScoreSequenceSpec, PCM & normalized waveform peaks
+    val chiptuneJson = """
+      ```json
+      {
+        "title": "Boss Theme 140",
+        "bpm": 260,
+        "notes": [
+          {"step": 0, "midiNote": 64, "channel": 0, "durationBeats": 0.25, "velocity": 0.85},
+          {"step": 2, "midiNote": 67, "channel": 0, "durationBeats": 0.25, "velocity": 0.85},
+          {"step": 4, "midiNote": 71, "channel": 2, "durationBeats": 0.50, "velocity": 0.80},
+          {"step": 8, "midiNote": 48, "channel": 1, "durationBeats": 0.50, "velocity": 0.90},
+          {"step": 12, "midiNote": 76, "channel": 0, "durationBeats": 0.50, "velocity": 0.95}
+        ]
+      }
+      ```
+    """.trimIndent()
+    val scoreSpec = builder.parseScoreSequenceJson("Boss Theme 140", chiptuneJson)
+    assertEquals(200, scoreSpec.bpm)
+    assertEquals(5, scoreSpec.notes.size)
+    val chipPcm = com.example.model.audio.AudioSynthAndDspEngine.synthesizeScoreSequencePcm(scoreSpec, 22050)
+    val chipPeaks = com.example.model.audio.AudioSynthAndDspEngine.computeWaveformPeaks(chipPcm)
+    assertTrue("Chiptune PCM must be non-empty", chipPcm.isNotEmpty())
+    assertTrue("Chiptune waveformPeaks must be non-empty", chipPeaks.isNotEmpty())
+    assertTrue("Chiptune peaks must be normalized 0..1", chipPeaks.all { it in 0f..1f })
+    assertTrue("Chiptune peaks must contain non-zero energy", chipPeaks.any { it > 0.05f })
+  }
+
+  @Test
+  fun `test omni ai provider capability checksheet covers all six providers`() {
+    val matrix = com.example.ai.OmniAiProviderCapabilities.capabilityMatrix()
+    assertEquals(6, matrix.size)
+    assertEquals(
+      com.example.ai.AiProviderType.entries.toSet(),
+      matrix.map { it.provider }.toSet()
+    )
+
+    val byProvider = matrix.associateBy { it.provider }
+
+    val local = byProvider[com.example.ai.AiProviderType.LOCAL_OPENAI_COMPAT]!!
+    assertTrue("LOCAL_OPENAI_COMPAT must be marked isLocalSelfHosted", local.isLocalSelfHosted)
+    assertTrue(local.supportsTextAndJsonBuild)
+
+    val claude = byProvider[com.example.ai.AiProviderType.ANTHROPIC_CLAUDE]!!
+    assertTrue("ANTHROPIC_CLAUDE must support Text/JSON builds", claude.supportsTextAndJsonBuild)
+    assertTrue("ANTHROPIC_CLAUDE must support Vision audits", claude.supportsVisionAudit)
+    assertEquals("ANTHROPIC_CLAUDE does not output 2D images natively", false, claude.supportsImage2D)
+    assertEquals(false, claude.isLocalSelfHosted)
+
+    val firebase = byProvider[com.example.ai.AiProviderType.FIREBASE_STUDIO]!!
+    assertTrue(firebase.supportsTextAndJsonBuild)
+    assertTrue(firebase.supportsVisionAudit)
+    assertTrue(firebase.supportsImage2D)
+    assertEquals(false, firebase.isLocalSelfHosted)
+
+    val openRouter = byProvider[com.example.ai.AiProviderType.OPENROUTER]!!
+    assertTrue(openRouter.supportsTextAndJsonBuild)
+    assertTrue(openRouter.supportsVisionAudit)
+    assertTrue(openRouter.supportsImage2D)
+    assertEquals(false, openRouter.isLocalSelfHosted)
+  }
 }
 
 

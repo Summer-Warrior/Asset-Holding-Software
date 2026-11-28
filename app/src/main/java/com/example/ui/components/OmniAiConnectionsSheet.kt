@@ -80,12 +80,14 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.AppUiState
 import com.example.MainViewModel
+import com.example.ai.AiProviderCapabilityRow
 import com.example.ai.AiProviderProfile
 import com.example.ai.AiProviderType
 import com.example.ai.AiTaskRole
 import com.example.ai.KnowledgeSourceEntry
 import com.example.ai.KnowledgeSourceKind
 import com.example.ai.MultiSourceContextRegistry
+import com.example.ai.OmniAiProviderCapabilities
 import com.example.ai.OmniAiRoutingConfig
 import com.example.ui.theme.AmberGold
 import com.example.ui.theme.CardBorder
@@ -373,6 +375,12 @@ private fun AiProvidersTabContent(
         }
     }
 
+    // Provider Capability Checksheet & Connected Fallback Order Card
+    ProviderCapabilityChecksheetCard(
+        profiles = uiState.aiProviderProfiles,
+        routing = uiState.omniAiRouting
+    )
+
     // Provider Connection Cards
     uiState.aiProviderProfiles.forEach { profile ->
         ProviderConnectionCard(
@@ -391,6 +399,206 @@ private fun AiProvidersTabContent(
             },
             onAssignRole = { role -> viewModel.setActiveAiProviderForRole(role, profile.provider) }
         )
+    }
+}
+
+@Composable
+private fun ProviderCapabilityChecksheetCard(
+    profiles: List<AiProviderProfile>,
+    routing: OmniAiRoutingConfig
+) {
+    val rows = remember { OmniAiProviderCapabilities.capabilityMatrix() }
+    val profileByProvider = remember(profiles) { profiles.associateBy { it.provider } }
+    val fallbackOrder = remember {
+        listOf(
+            AiProviderType.FIREBASE_STUDIO,
+            AiProviderType.OPENROUTER,
+            AiProviderType.DIRECT_GEMINI,
+            AiProviderType.OPENAI,
+            AiProviderType.ANTHROPIC_CLAUDE,
+            AiProviderType.LOCAL_OPENAI_COMPAT
+        )
+    }
+
+    Card(
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF0A1222)),
+        border = BorderStroke(1.25.dp, EmeraldGreen.copy(alpha = 0.55f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("omni_provider_capability_checksheet")
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "PROVIDER CAPABILITY CHECKSHEET",
+                    fontFamily = TechMono,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = EmeraldGreen
+                )
+                Text(
+                    text = "${profiles.count { it.isConnected }}/${rows.size} CONNECTED",
+                    fontFamily = TechMono,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = CyanNeon
+                )
+            }
+
+            // Table Header
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0xFF111C31))
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "PROVIDER",
+                    fontFamily = TechMono,
+                    fontSize = 8.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF94A3B8),
+                    modifier = Modifier.weight(1.75f)
+                )
+                CapabilityHeaderCell("Text/3D\nAudio", Modifier.weight(1f))
+                CapabilityHeaderCell("Vision", Modifier.weight(0.75f))
+                CapabilityHeaderCell("2D Art", Modifier.weight(0.75f))
+                CapabilityHeaderCell("Local", Modifier.weight(0.75f))
+            }
+
+            // All 6 Provider Rows
+            rows.forEach { cap: AiProviderCapabilityRow ->
+                val isConnected = profileByProvider[cap.provider]?.isConnected == true
+                val isAssignedAny = routing.activeTextProvider == cap.provider ||
+                    routing.activeVisionProvider == cap.provider ||
+                    routing.activeImageProvider == cap.provider
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(7.dp))
+                        .background(if (isAssignedAny) Color(0xFF0E1D33) else Color(0xFF080E1B))
+                        .border(
+                            width = 1.dp,
+                            color = if (isConnected) EmeraldGreen.copy(alpha = 0.25f) else CardBorder.copy(alpha = 0.4f),
+                            shape = RoundedCornerShape(7.dp)
+                        )
+                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                        .testTag("cap_row_${cap.provider.name.lowercase()}"),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1.75f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            text = cap.displayName,
+                            fontFamily = TechMono,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = if (isConnected) "CONNECTED" else "OFFLINE",
+                            fontFamily = TechMono,
+                            fontSize = 7.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isConnected) EmeraldGreen else Color(0xFF64748B)
+                        )
+                    }
+                    CapabilityBadgeCell(cap.supportsTextAndJsonBuild, EmeraldGreen, Modifier.weight(1f))
+                    CapabilityBadgeCell(cap.supportsVisionAudit, CyanNeon, Modifier.weight(0.75f))
+                    CapabilityBadgeCell(cap.supportsImage2D, MagentaNeon, Modifier.weight(0.75f))
+                    CapabilityBadgeCell(cap.isLocalSelfHosted, AmberGold, Modifier.weight(0.75f))
+                }
+            }
+
+            HorizontalDivider(color = CardBorder)
+
+            // Active Connected Fallback Order Strip
+            Text(
+                text = "CONNECTED FALLBACK ORDER",
+                fontFamily = TechMono,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                color = AmberGold
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                fallbackOrder.forEachIndexed { idx, provider ->
+                    val connected = profileByProvider[provider]?.isConnected == true
+                    val chipAccent = if (connected) EmeraldGreen else Color(0xFF64748B)
+                    Surface(
+                        color = chipAccent.copy(alpha = if (connected) 0.16f else 0.08f),
+                        shape = RoundedCornerShape(6.dp),
+                        border = BorderStroke(1.dp, chipAccent.copy(alpha = if (connected) 0.6f else 0.35f))
+                    ) {
+                        Text(
+                            text = "${idx + 1}. ${shortProviderName(provider)} • ${if (connected) "CONNECTED" else "OFFLINE"}",
+                            fontFamily = TechMono,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = chipAccent,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CapabilityHeaderCell(label: String, modifier: Modifier) {
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        Text(
+            text = label,
+            fontFamily = TechMono,
+            fontSize = 7.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color(0xFF94A3B8),
+            lineHeight = 9.sp
+        )
+    }
+}
+
+@Composable
+private fun CapabilityBadgeCell(supported: Boolean, accent: Color, modifier: Modifier) {
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        Surface(
+            color = if (supported) accent.copy(alpha = 0.18f) else Color(0xFF1E293B).copy(alpha = 0.6f),
+            shape = RoundedCornerShape(4.dp),
+            border = BorderStroke(
+                1.dp,
+                if (supported) accent.copy(alpha = 0.65f) else Color(0xFF334155)
+            )
+        ) {
+            Text(
+                text = if (supported) "✓" else "—",
+                fontFamily = TechMono,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (supported) accent else Color(0xFF64748B),
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+            )
+        }
     }
 }
 

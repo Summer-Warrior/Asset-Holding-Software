@@ -26,8 +26,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Brush
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.ViewInAr
 import androidx.compose.material3.Button
@@ -74,6 +76,7 @@ import androidx.compose.ui.unit.sp
 import com.example.AppUiState
 import com.example.MainViewModel
 import com.example.R
+import com.example.ai.AiBuildTargetKind
 import com.example.ai.GeminiInputImageSource
 import com.example.ai.GeminiOperationMode
 import com.example.ai.PromptAssetPreset
@@ -102,8 +105,11 @@ fun ForgeStudioScreen(
     modifier: Modifier = Modifier,
     openCreateTabTrigger: Int = 0,
     onNavigateTo3D: (() -> Unit)? = null,
+    onNavigateTo3DBuilder: (() -> Unit)? = null,
     onNavigateToSprites: (() -> Unit)? = null,
     onNavigateToScratchCanvas: (() -> Unit)? = null,
+    onNavigateToTextures: (() -> Unit)? = null,
+    onNavigateToAudioVault: (() -> Unit)? = null,
     onNavigateToSuite: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
@@ -284,11 +290,104 @@ fun ForgeStudioScreen(
                             )
                         }
 
+                        val activeBuildTarget = uiState.selectedAiBuildTarget
+                        val isSpriteTarget = activeBuildTarget == AiBuildTargetKind.SPRITE_2D
+
+                        // AI Asset Build Target Selector Row (All 5 Modalities)
                         Text(
-                            text = "Generate an original 2D sprite, multi-frame sheet, portrait, or icon directly from your description using your connected AI provider (zero template fallback). Auto-strips chroma-key backgrounds and slices multi-frame sheets cleanly.",
+                            text = "WHAT SHOULD AI BUILD FROM SCRATCH?",
+                            fontFamily = TechMono,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = CyanNeon
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            AiBuildTargetKind.entries.forEach { kind ->
+                                val selected = activeBuildTarget == kind
+                                FilterChip(
+                                    selected = selected,
+                                    onClick = { viewModel.selectAiBuildTarget(kind) },
+                                    label = {
+                                        Text(
+                                            text = kind.label,
+                                            fontFamily = TechMono,
+                                            fontSize = 11.sp,
+                                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                                        )
+                                    },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = EmeraldGreen,
+                                        selectedLabelColor = Color(0xFF031B12),
+                                        containerColor = Color(0xFF1E293B),
+                                        labelColor = Color.White
+                                    ),
+                                    modifier = Modifier.testTag("ai_build_target_${kind.name.lowercase()}")
+                                )
+                            }
+                        }
+
+                        Text(
+                            text = when (activeBuildTarget) {
+                                AiBuildTargetKind.SPRITE_2D ->
+                                    "Generate an original 2D sprite, multi-frame sheet, portrait, or icon directly from your description using your connected AI image provider (zero template fallback). Auto-strips chroma-key backgrounds and runs closed-loop style auditing."
+                                AiBuildTargetKind.MODEL_3D ->
+                                    "Uses your active AI text provider (Firebase, OpenRouter, Gemini, Claude, OpenAI, or Local Ollama) to construct a multi-part editable 3D kitbash blueprint and compile it into a live .OBJ mesh."
+                                AiBuildTargetKind.TEXTURE_MATERIAL ->
+                                    "Generates a custom procedural pixel material recipe with high-contrast color ramps and pixel accents directly into your editable Texture Painter and active 3D UV slot."
+                                AiBuildTargetKind.AUDIO_CRY ->
+                                    "Synthesizes a brand-new procedural creature cry / retro SFX spec with frequency sweeps and harmonic modulation, saves it to your Audio Vault, and auditions it through your active soundchip DSP."
+                                AiBuildTargetKind.AUDIO_CHIPTUNE ->
+                                    "Composes an original 16-step multi-channel chiptune loop (Lead Pulse, Bass Triangle & Harmony), saves it to your Audio Vault, and plays it live through your active soundchip DSP."
+                            },
                             fontSize = 12.sp,
                             color = Color(0xFF94A3B8)
                         )
+
+                        val namePlaceholder = when (activeBuildTarget) {
+                            AiBuildTargetKind.SPRITE_2D -> "e.g., Emerald Hatchling"
+                            AiBuildTargetKind.MODEL_3D -> "e.g., Cyber Dragon Mech"
+                            AiBuildTargetKind.TEXTURE_MATERIAL -> "e.g., Obsidian Mana Plate"
+                            AiBuildTargetKind.AUDIO_CRY -> "e.g., Crystal Phoenix Roar"
+                            AiBuildTargetKind.AUDIO_CHIPTUNE -> "e.g., Boss Overdrive 140"
+                        }
+                        val promptPlaceholder = when (activeBuildTarget) {
+                            AiBuildTargetKind.SPRITE_2D -> "emerald dragon hatchling with golden horns and glowing cyan Mana Circuits"
+                            AiBuildTargetKind.MODEL_3D -> "twin-winged cyber dragon mech with armored chest core and dorsal thrusters"
+                            AiBuildTargetKind.TEXTURE_MATERIAL -> "glowing obsidian mana-circuit armor plate with gold rivets and cyan traces"
+                            AiBuildTargetKind.AUDIO_CRY -> "deep resonant crystal phoenix roar rising into a shimmering harmonic trill"
+                            AiBuildTargetKind.AUDIO_CHIPTUNE -> "upbeat 140 BPM 16-bit arcade boss theme with driving bassline and heroic lead"
+                        }
+                        val quickExamples = when (activeBuildTarget) {
+                            AiBuildTargetKind.SPRITE_2D -> listOf(
+                                "emerald dragon hatchling with golden horns",
+                                "cyber-samurai guardian with neon plasma visor"
+                            )
+                            AiBuildTargetKind.MODEL_3D -> listOf(
+                                "twin-winged cyber dragon mech",
+                                "armored hover tank with orbital crystal turret",
+                                "ancient floating rune obelisk with halo rings"
+                            )
+                            AiBuildTargetKind.TEXTURE_MATERIAL -> listOf(
+                                "glowing obsidian mana-circuit armor plate",
+                                "molten emerald dragon scales with gold sheen",
+                                "weathered dungeon fortress brick with cyan runes"
+                            )
+                            AiBuildTargetKind.AUDIO_CRY -> listOf(
+                                "deep resonant crystal phoenix roar",
+                                "high-pitched cyber fox chirp with plasma warble",
+                                "heavy metallic boss mech activation siren"
+                            )
+                            AiBuildTargetKind.AUDIO_CHIPTUNE -> listOf(
+                                "upbeat 140 BPM 16-bit arcade boss theme",
+                                "heroic 128 BPM retro RPG overworld adventure loop",
+                                "fast 165 BPM neon cyber-racer synthwave arpeggio"
+                            )
+                        }
 
                         // Asset Name
                         OutlinedTextField(
@@ -298,7 +397,7 @@ fun ForgeStudioScreen(
                             label = { Text("Asset Name", fontFamily = TechMono, fontSize = 11.sp) },
                             placeholder = {
                                 Text(
-                                    "e.g., Emerald Hatchling",
+                                    namePlaceholder,
                                     color = Color(0xFF64748B),
                                     fontSize = 12.sp
                                 )
@@ -325,7 +424,7 @@ fun ForgeStudioScreen(
                             label = { Text("Subject Description", fontFamily = TechMono, fontSize = 11.sp) },
                             placeholder = {
                                 Text(
-                                    "emerald dragon hatchling with golden horns and glowing cyan Mana Circuits",
+                                    promptPlaceholder,
                                     color = Color(0xFF64748B),
                                     fontSize = 12.sp
                                 )
@@ -343,6 +442,34 @@ fun ForgeStudioScreen(
                                 .testTag("prompt_text_field")
                         )
 
+                        // Tailored Quick-Fill Prompt Example Chips
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            quickExamples.forEachIndexed { idx, sample ->
+                                FilterChip(
+                                    selected = false,
+                                    onClick = { viewModel.updatePromptText(sample) },
+                                    label = {
+                                        Text(
+                                            text = sample,
+                                            fontFamily = TechMono,
+                                            fontSize = 9.sp
+                                        )
+                                    },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        containerColor = Color(0xFF162033),
+                                        labelColor = Color(0xFFCBD5E1)
+                                    ),
+                                    modifier = Modifier.testTag("ai_build_example_$idx")
+                                )
+                            }
+                        }
+
+                        if (isSpriteTarget) {
                         // Asset Type Preset Chips
                         Text(
                             text = "ASSET TYPE PRESET",
@@ -471,10 +598,11 @@ fun ForgeStudioScreen(
                             onToggle = { viewModel.toggleAutoRetryAiStyleGate() },
                             testTag = "scratch_auto_audit_repair_switch"
                         )
+                        }
 
-                        // Primary From-Scratch AI Generate CTA
+                        // Primary From-Scratch AI Multi-Asset Build CTA
                         Button(
-                            onClick = { viewModel.createBrandNewAssetFromScratchWithAi(alsoExtrude3D) },
+                            onClick = { viewModel.buildBrandNewAssetWithAi(alsoExtrude3D) },
                             enabled = !uiState.isCreatingFromScratchWithAi,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = EmeraldGreen,
@@ -494,7 +622,7 @@ fun ForgeStudioScreen(
                                 )
                                 Spacer(Modifier.width(10.dp))
                                 Text(
-                                    text = "Generating From Scratch...",
+                                    text = "Building ${activeBuildTarget.label}...",
                                     fontFamily = TechMono,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold
@@ -507,9 +635,9 @@ fun ForgeStudioScreen(
                                 )
                                 Spacer(Modifier.width(8.dp))
                                 Text(
-                                    text = "Generate Brand-New Asset From Scratch (AI)",
+                                    text = "Build Brand-New ${activeBuildTarget.label} with AI",
                                     fontFamily = TechMono,
-                                    fontSize = 12.sp,
+                                    fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
@@ -533,6 +661,104 @@ fun ForgeStudioScreen(
                                     color = Color(0xFFFDA4AF),
                                     modifier = Modifier.padding(12.dp)
                                 )
+                            }
+                        }
+
+                        // Sleek Emerald Result Card for Latest AI-Built Multi-Asset Creation
+                        val buildSummary = uiState.lastAiBuildSummary
+                        if (!buildSummary.isNullOrBlank()) {
+                            Surface(
+                                color = Color(0xFF071B16),
+                                shape = RoundedCornerShape(12.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.2.dp, EmeraldGreen.copy(alpha = 0.7f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("ai_multi_asset_result_card")
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.CheckCircle,
+                                            contentDescription = "AI Build Complete",
+                                            tint = EmeraldGreen,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Text(
+                                            text = "AI ASSET BUILT & READY TO EDIT",
+                                            fontFamily = TechMono,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = EmeraldGreen
+                                        )
+                                    }
+                                    Text(
+                                        text = buildSummary,
+                                        fontSize = 11.sp,
+                                        color = Color(0xFFE2E8F0)
+                                    )
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .horizontalScroll(rememberScrollState()),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        val jump3D = onNavigateTo3DBuilder ?: onNavigateTo3D
+                                        if (jump3D != null) {
+                                            OutlinedButton(
+                                                onClick = jump3D,
+                                                border = androidx.compose.foundation.BorderStroke(1.dp, CyanNeon),
+                                                colors = ButtonDefaults.outlinedButtonColors(contentColor = CyanNeon),
+                                                modifier = Modifier.testTag("ai_result_jump_3d_btn")
+                                            ) {
+                                                Icon(Icons.Default.ViewInAr, contentDescription = null, modifier = Modifier.size(14.dp))
+                                                Spacer(Modifier.width(5.dp))
+                                                Text("Edit in 3D Builder", fontFamily = TechMono, fontSize = 10.sp)
+                                            }
+                                        }
+                                        if (onNavigateToTextures != null) {
+                                            OutlinedButton(
+                                                onClick = onNavigateToTextures,
+                                                border = androidx.compose.foundation.BorderStroke(1.dp, AmberGold),
+                                                colors = ButtonDefaults.outlinedButtonColors(contentColor = AmberGold),
+                                                modifier = Modifier.testTag("ai_result_jump_textures_btn")
+                                            ) {
+                                                Icon(Icons.Default.Palette, contentDescription = null, modifier = Modifier.size(14.dp))
+                                                Spacer(Modifier.width(5.dp))
+                                                Text("Edit in Texture Studio", fontFamily = TechMono, fontSize = 10.sp)
+                                            }
+                                        }
+                                        if (onNavigateToAudioVault != null) {
+                                            OutlinedButton(
+                                                onClick = onNavigateToAudioVault,
+                                                border = androidx.compose.foundation.BorderStroke(1.dp, MagentaNeon),
+                                                colors = ButtonDefaults.outlinedButtonColors(contentColor = MagentaNeon),
+                                                modifier = Modifier.testTag("ai_result_jump_audio_btn")
+                                            ) {
+                                                Icon(Icons.Default.MusicNote, contentDescription = null, modifier = Modifier.size(14.dp))
+                                                Spacer(Modifier.width(5.dp))
+                                                Text("Audition in Audio Vault", fontFamily = TechMono, fontSize = 10.sp)
+                                            }
+                                        }
+                                        if (onNavigateToSprites != null) {
+                                            OutlinedButton(
+                                                onClick = onNavigateToSprites,
+                                                border = androidx.compose.foundation.BorderStroke(1.dp, EmeraldGreen),
+                                                colors = ButtonDefaults.outlinedButtonColors(contentColor = EmeraldGreen),
+                                                modifier = Modifier.testTag("ai_result_jump_sprites_btn")
+                                            ) {
+                                                Icon(Icons.Default.GridView, contentDescription = null, modifier = Modifier.size(14.dp))
+                                                Spacer(Modifier.width(5.dp))
+                                                Text("View in Sprite Studio", fontFamily = TechMono, fontSize = 10.sp)
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
 

@@ -337,6 +337,11 @@ fun PixelForgeApp(viewModel: MainViewModel) {
                         viewModel = viewModel,
                         openCreateTabTrigger = forgeCreateTabTrigger,
                         onNavigateTo3D = { selectedTab = 0 },
+                        onNavigateTo3DBuilder = {
+                            model3DCreateModeTrigger++
+                            showGalleriesOverlay = false
+                            selectedTab = 0
+                        },
                         onNavigateToSprites = { selectedTab = 1 },
                         onNavigateToScratchCanvas = {
                             viewModel.startNewBlankSpriteProject(
@@ -347,6 +352,14 @@ fun PixelForgeApp(viewModel: MainViewModel) {
                             spriteCreateModeTrigger++
                             showGalleriesOverlay = false
                             selectedTab = 1
+                        },
+                        onNavigateToTextures = {
+                            textureCreateModeTrigger++
+                            showGalleriesOverlay = false
+                            selectedTab = 4
+                        },
+                        onNavigateToAudioVault = {
+                            showGalleriesOverlay = true
                         },
                         onNavigateToSuite = { selectedTab = 2 }
                     )
