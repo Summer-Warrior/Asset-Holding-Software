@@ -30,8 +30,12 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.CloudSync
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.MusicNote
@@ -83,6 +87,8 @@ import com.example.AppUiState
 import com.example.MainViewModel
 import com.example.model.audio.AudioAssetEntry
 import com.example.model.audio.SoundchipDspProfile
+import com.example.model.vault.ByosFolderLayout
+import com.example.model.vault.ByosStorageProvider
 import com.example.model.vault.ImportPipelineStage
 import com.example.model.vault.VaultCacheState
 import com.example.model.vault.VaultCatalogEntry
@@ -929,7 +935,14 @@ private fun ColdVaultAndSixStageTabContent(
             }
         }
 
-        // 4. Vault PIN Lock Controls & Honest Cloudflare R2 / Local Cold Vault Config
+        // 4. BYOS Personal Drive / Cloud Folder Workspace (MPV_Ecosystem/...)
+        ByosPersonalFolderWorkspaceCard(
+            uiState = uiState,
+            viewModel = viewModel,
+            context = context
+        )
+
+        // 5. Vault PIN Lock Controls & Honest Cloudflare R2 / Local Cold Vault Config
         Surface(
             shape = RoundedCornerShape(12.dp),
             color = ObsidianCard,
@@ -1032,6 +1045,355 @@ private fun ColdVaultAndSixStageTabContent(
                     Icon(Icons.Default.Save, contentDescription = "Save Cold Vault Config", modifier = Modifier.size(15.dp))
                     Spacer(Modifier.width(6.dp))
                     Text("Save Cold Vault Target Config", fontFamily = TechMono, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ByosPersonalFolderWorkspaceCard(
+    uiState: AppUiState,
+    viewModel: MainViewModel,
+    context: Context
+) {
+    val config = uiState.byosWorkspaceConfig
+    var selectedProvider by remember(config.provider) { mutableStateOf(config.provider) }
+    var hubEmailInput by remember(config.masterHubAccountEmail) { mutableStateOf(config.masterHubAccountEmail) }
+    var autoSyncEnabled by remember(config.autoSyncOnImport) { mutableStateOf(config.autoSyncOnImport) }
+
+    val openFolderLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        if (treeUri != null) {
+            viewModel.mountByosSafFolder(context, treeUri)
+        }
+    }
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = ObsidianCard,
+        border = BorderStroke(1.dp, CyanNeon.copy(alpha = 0.55f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("byos_workspace_card")
+    ) {
+        Column(
+            modifier = Modifier.padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CloudSync,
+                        contentDescription = "BYOS Personal Cloud Folder Workspace",
+                        tint = CyanNeon,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "BYOS PERSONAL DRIVE / FOLDER WORKSPACE",
+                        fontFamily = TechMono,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = CyanNeon
+                    )
+                }
+                Surface(
+                    color = if (config.isMounted) EmeraldGreen.copy(alpha = 0.18f) else Color(0xFF1E293B),
+                    shape = RoundedCornerShape(5.dp),
+                    border = BorderStroke(
+                        1.dp,
+                        if (config.isMounted) EmeraldGreen.copy(alpha = 0.65f) else CardBorder
+                    )
+                ) {
+                    Text(
+                        text = if (config.isMounted) "MOUNTED" else "NOT MOUNTED",
+                        fontFamily = TechMono,
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (config.isMounted) EmeraldGreen else MutedSlate,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+
+            Text(
+                text = "Mount any personal SAF or synced cloud folder (Google Drive / OneDrive / Syncthing) using Android's zero-permission folder picker. Manages app-owned ${ByosFolderLayout.ROOT_FOLDER}/ subfolders only.",
+                fontSize = 11.sp,
+                color = MutedSlate
+            )
+
+            // Provider Selector Chips
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                ByosStorageProvider.entries.forEach { provider ->
+                    val isSelected = selectedProvider == provider
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = {
+                            selectedProvider = provider
+                            viewModel.updateByosProviderAndHubConfig(
+                                context = context,
+                                provider = provider,
+                                masterHubEmail = hubEmailInput,
+                                autoSyncOnImport = autoSyncEnabled
+                            )
+                        },
+                        label = {
+                            Text(
+                                text = provider.label,
+                                fontFamily = TechMono,
+                                fontSize = 9.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                            )
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = CyanNeon,
+                            selectedLabelColor = Color(0xFF031B26),
+                            containerColor = Color(0xFF1E293B),
+                            labelColor = Color.White
+                        ),
+                        modifier = Modifier.testTag("byos_provider_${provider.name.lowercase()}")
+                    )
+                }
+            }
+
+            // Mounted Folder & App-Owned Subfolder Pills
+            Surface(
+                color = ObsidianSurface,
+                shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(1.dp, CardBorder),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = if (config.isMounted) {
+                            "Mounted Root: ${config.displayFolderName.ifBlank { config.persistedTreeUri }}"
+                        } else {
+                            "Mounted Root: None selected yet"
+                        },
+                        fontFamily = TechMono,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (config.isMounted) EmeraldGreen else Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        ByosFolderLayout.relativePaths().forEach { folderPath ->
+                            Surface(
+                                color = Color(0xFF172338),
+                                shape = RoundedCornerShape(5.dp)
+                            ) {
+                                Text(
+                                    text = folderPath,
+                                    fontFamily = TechMono,
+                                    fontSize = 8.sp,
+                                    color = CyanNeon,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Master Hub Account Email field when Google Drive (Master Hub) is selected
+            if (selectedProvider == ByosStorageProvider.GOOGLE_DRIVE_APP_SCOPE) {
+                OutlinedTextField(
+                    value = hubEmailInput,
+                    onValueChange = { hubEmailInput = it },
+                    label = { Text("Master Hub Account Email (Handoff Contract)", fontFamily = TechMono, fontSize = 10.sp) },
+                    placeholder = { Text("creator@example.com", fontSize = 11.sp, color = MutedSlate) },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("byos_master_hub_email_input"),
+                    colors = obsidianFieldColors(CyanNeon)
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Auto-Sync Workspace Metadata on Import",
+                    fontFamily = TechMono,
+                    fontSize = 10.sp,
+                    color = Color.White,
+                    modifier = Modifier.weight(1f)
+                )
+                Switch(
+                    checked = autoSyncEnabled,
+                    onCheckedChange = { checked ->
+                        autoSyncEnabled = checked
+                        viewModel.updateByosProviderAndHubConfig(
+                            context = context,
+                            provider = selectedProvider,
+                            masterHubEmail = hubEmailInput,
+                            autoSyncOnImport = checked
+                        )
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color(0xFF031B26),
+                        checkedTrackColor = CyanNeon
+                    ),
+                    modifier = Modifier.testTag("byos_auto_sync_switch")
+                )
+            }
+
+            if (selectedProvider == ByosStorageProvider.GOOGLE_DRIVE_APP_SCOPE) {
+                OutlinedButton(
+                    onClick = {
+                        viewModel.updateByosProviderAndHubConfig(
+                            context = context,
+                            provider = selectedProvider,
+                            masterHubEmail = hubEmailInput,
+                            autoSyncOnImport = autoSyncEnabled
+                        )
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                        .testTag("byos_save_hub_config_btn"),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, EmeraldGreen.copy(alpha = 0.7f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = EmeraldGreen)
+                ) {
+                    Icon(Icons.Default.Save, contentDescription = "Save Master Hub Config", modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Save Master Hub Handoff Config", fontFamily = TechMono, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            // Primary SAF Action Buttons
+            Button(
+                onClick = { openFolderLauncher.launch(null) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .testTag("byos_mount_folder_btn"),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = CyanNeon,
+                    contentColor = Color(0xFF031B26)
+                )
+            ) {
+                Icon(Icons.Default.FolderOpen, contentDescription = "Mount Personal Folder", modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = if (config.isMounted) "Change Personal SAF Folder" else "Mount Personal Folder",
+                    fontFamily = TechMono,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = { viewModel.syncVaultToByosFolder(context) },
+                    enabled = config.isMounted,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(44.dp)
+                        .testTag("byos_push_vault_btn"),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, EmeraldGreen.copy(alpha = if (config.isMounted) 0.75f else 0.3f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = EmeraldGreen)
+                ) {
+                    Icon(Icons.Default.CloudUpload, contentDescription = "Push Vault and Skins", modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Push Vault & Skins", fontFamily = TechMono, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                }
+
+                OutlinedButton(
+                    onClick = { viewModel.readVaultFromByosFolder(context) },
+                    enabled = config.isMounted,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(44.dp)
+                        .testTag("byos_read_folder_btn"),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, AmberGold.copy(alpha = if (config.isMounted) 0.75f else 0.3f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = AmberGold)
+                ) {
+                    Icon(Icons.Default.CloudDownload, contentDescription = "Read From Folder", modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Read From Folder", fontFamily = TechMono, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            if (config.isMounted) {
+                OutlinedButton(
+                    onClick = { viewModel.disconnectByosFolder(context) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(42.dp)
+                        .testTag("byos_disconnect_folder_btn"),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, MagentaNeon.copy(alpha = 0.65f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MagentaNeon)
+                ) {
+                    Icon(Icons.Default.LinkOff, contentDescription = "Disconnect Folder", modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Disconnect Mounted Folder", fontFamily = TechMono, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            // Real Sync Report Telemetry Banner
+            val syncReport = uiState.lastByosSyncReport
+            if (syncReport != null) {
+                val accent = if (syncReport.success) EmeraldGreen else MagentaNeon
+                Surface(
+                    color = Color(0xFF07131F),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, accent.copy(alpha = 0.55f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("byos_sync_report_banner")
+                ) {
+                    Column(
+                        modifier = Modifier.padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Text(
+                            text = "${if (syncReport.success) "SYNC OK" else "SYNC ISSUE"} • ${syncReport.provider.badge} • W:${syncReport.filesWritten} R:${syncReport.filesRead} • Dirs:${syncReport.foldersVerified.size}",
+                            fontFamily = TechMono,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = accent
+                        )
+                        Text(
+                            text = syncReport.summary,
+                            fontSize = 10.sp,
+                            color = Color(0xFFE2E8F0)
+                        )
+                    }
                 }
             }
         }

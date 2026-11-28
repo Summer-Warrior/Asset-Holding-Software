@@ -2355,6 +2355,195 @@ class ExampleRobolectricTest {
     assertTrue("Saved sequence peaks must be normalized 0f..1f", savedSeq.waveformPeaks.all { it in 0f..1f })
     assertTrue("Saved sequence must have non-zero audio energy", savedSeq.waveformPeaks.any { it > 0.05f })
   }
+
+  @Test
+  fun `test closed loop ai style gate auto audits and retries on style failure`() = kotlinx.coroutines.runBlocking {
+    // 1. Create a failing 64x64 flat gray bitmap with an unstripped #FF00FF magenta border
+    val failingBitmap = android.graphics.Bitmap.createBitmap(64, 64, android.graphics.Bitmap.Config.ARGB_8888)
+    failingBitmap.eraseColor(android.graphics.Color.rgb(128, 128, 128))
+    val magenta = android.graphics.Color.rgb(255, 0, 255)
+    for (i in 0 until 64) {
+      for (b in 0 until 3) {
+        failingBitmap.setPixel(i, b, magenta)
+        failingBitmap.setPixel(i, 63 - b, magenta)
+        failingBitmap.setPixel(b, i, magenta)
+        failingBitmap.setPixel(63 - b, i, magenta)
+      }
+    }
+
+    // 2. Create a clean repaired 64x64 cel-shaded black-ink + cyan sprite on transparent background
+    val repairedBitmap = android.graphics.Bitmap.createBitmap(64, 64, android.graphics.Bitmap.Config.ARGB_8888)
+    repairedBitmap.eraseColor(android.graphics.Color.TRANSPARENT)
+    val inkBlack = android.graphics.Color.rgb(12, 12, 18)
+    val neonCyan = android.graphics.Color.rgb(0, 229, 255)
+    val highlightWhite = android.graphics.Color.rgb(245, 252, 255)
+    for (y in 10 until 54) {
+      for (x in 14 until 50) {
+        val isBorder = x <= 16 || x >= 47 || y <= 12 || y >= 51
+        val isHighlight = x in 20..28 && y in 18..26
+        val color = when {
+          isBorder -> inkBlack
+          isHighlight -> highlightWhite
+          else -> neonCyan
+        }
+        repairedBitmap.setPixel(x, y, color)
+      }
+    }
+
+    // Verify failing bitmap triggers NEEDS_REVISION with chroma bleed & low score (< 68%)
+    val failingAudit = com.example.ai.CanonicalAssetAndCodeAuditor.auditAsset(
+      bitmap = failingBitmap,
+      assetName = "Emerald Hatchling",
+      promptUsed = "emerald dragon hatchling 32-bit arcade comic cel sprite",
+      hardwareTier = com.example.ai.PromptHardwareTier.ARCADE_32BIT_60FPS,
+      expectedChromaKeyHex = "#FF00FF"
+    )
+    assertTrue("Failing bitmap must flag chromaBleedDetected", failingAudit.chromaBleedDetected)
+    assertTrue(
+      "Failing bitmap score should be < 68f, got ${failingAudit.styleFidelityScorePercent}",
+      failingAudit.styleFidelityScorePercent < 68f
+    )
+    assertEquals(com.example.ai.AssetFidelityTag.NEEDS_REVISION, failingAudit.fidelityTag)
+
+    // 3. Run closed-loop style gate with 1-pass auto-repair callback
+    var repairInvocations = 0
+    var capturedDirective = ""
+    val gateResult = com.example.ai.CanonicalAssetAndCodeAuditor.runClosedLoopStyleGate(
+      initialBitmap = failingBitmap,
+      assetName = "Emerald Hatchling",
+      promptUsed = "emerald dragon hatchling 32-bit arcade comic cel sprite",
+      hardwareTier = com.example.ai.PromptHardwareTier.ARCADE_32BIT_60FPS,
+      expectedChromaKeyHex = "#FF00FF",
+      referenceBitmap = null,
+      allowSingleAutoRepair = true,
+      repairGenerator = { directive ->
+        repairInvocations++
+        capturedDirective = directive
+        repairedBitmap
+      }
+    )
+
+    assertEquals("Auto-repair must trigger exactly once", 1, repairInvocations)
+    assertTrue("Correction directive must target chroma cleanup", capturedDirective.contains("CHROMA", ignoreCase = true))
+    assertTrue(gateResult.autoRepairAttempted)
+    assertTrue(gateResult.autoRepairImprovedScore)
+    assertEquals(repairedBitmap, gateResult.finalBitmap)
+    assertEquals(false, gateResult.auditReport.chromaBleedDetected)
+    assertTrue(
+      "Repaired bitmap score should be >= 75f, got ${gateResult.auditReport.styleFidelityScorePercent}",
+      gateResult.auditReport.styleFidelityScorePercent >= 75f
+    )
+    assertEquals(com.example.ai.AssetFidelityTag.PUBLIC_CLEAN_ROOM, gateResult.auditReport.fidelityTag)
+
+    // 4. Clean bitmap passes on first attempt without invoking repairGenerator
+    var cleanPassRepairs = 0
+    val cleanGate = com.example.ai.CanonicalAssetAndCodeAuditor.runClosedLoopStyleGate(
+      initialBitmap = repairedBitmap,
+      assetName = "Emerald Hatchling Clean",
+      promptUsed = "emerald dragon hatchling 32-bit arcade comic cel sprite",
+      hardwareTier = com.example.ai.PromptHardwareTier.ARCADE_32BIT_60FPS,
+      expectedChromaKeyHex = "#FF00FF",
+      allowSingleAutoRepair = true,
+      repairGenerator = {
+        cleanPassRepairs++
+        failingBitmap
+      }
+    )
+    assertEquals(0, cleanPassRepairs)
+    assertEquals(false, cleanGate.autoRepairAttempted)
+    assertEquals(com.example.ai.AssetFidelityTag.PUBLIC_CLEAN_ROOM, cleanGate.auditReport.fidelityTag)
+  }
+
+  @Test
+  fun `test byos workspace folder layout sync read round trip and config json contract`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+
+    // 1. Config JSON contract & SharedPreferences persistence round-trip
+    val config = com.example.model.vault.ByosWorkspaceConfig(
+      provider = com.example.model.vault.ByosStorageProvider.GOOGLE_DRIVE_APP_SCOPE,
+      persistedTreeUri = "content://com.android.externalstorage.documents/tree/primary%3AStudioSync",
+      displayFolderName = "StudioSync",
+      masterHubAccountEmail = "creator@mpvecosystem.dev",
+      lastSyncEpochMs = 1764280000000L,
+      autoSyncOnImport = true
+    )
+    val parsedConfig = com.example.model.vault.ByosWorkspaceConfig.fromJsonString(config.toJsonString())
+    assertEquals(config, parsedConfig)
+    assertTrue(parsedConfig.isMounted)
+
+    com.example.model.vault.ByosCloudFolderManager.saveConfig(context, config)
+    val loadedFromPrefs = com.example.model.vault.ByosCloudFolderManager.loadConfig(context)
+    assertEquals(config, loadedFromPrefs)
+
+    // 2. Directory layout creation, push (vault_catalog.json + active_skin.json + .vault.enc), and read round-trip
+    val tempRoot = java.io.File(context.cacheDir, "byos_test_root_${System.currentTimeMillis()}")
+    val localColdFile = java.io.File(context.cacheDir, "byos_sample_abc123.vault.enc")
+    try {
+      tempRoot.mkdirs()
+      localColdFile.writeBytes("ENCRYPTED_COLD_VAULT_PAYLOAD".toByteArray())
+
+      val sampleEntry = com.example.model.vault.VaultCatalogEntry(
+        id = "vault_entry_001",
+        title = "Kaelen Arcade Sprite",
+        slotName = "hero_idle_sheet",
+        assetKind = com.example.model.vault.VaultAssetKind.IMAGE,
+        extension = "png",
+        sha256Hex = "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        byteSize = 4096L,
+        localFilePath = "",
+        coldVaultPath = localColdFile.absolutePath,
+        cacheState = com.example.model.vault.VaultCacheState.REMOTE_ONLY,
+        gameTag = "MPV In-Universe MMO",
+        groupTag = "Protagonists",
+        characterTag = "Kaelen"
+      )
+
+      val customSkin = com.example.model.vault.SkinManifest(
+        skinId = "mpv-byos-test-skin",
+        displayName = "MPV BYOS Synced Skin Pack",
+        gameTag = "MPV In-Universe MMO",
+        slotBindings = mapOf(
+          "hero_idle_sheet" to "vault_entry_001",
+          "cry_kaelen" to "audio_kaelen_01"
+        )
+      )
+
+      val syncReport = com.example.model.vault.ByosCloudFolderManager.syncVaultToDirectory(
+        rootDir = tempRoot,
+        catalog = listOf(sampleEntry),
+        activeSkin = customSkin,
+        provider = com.example.model.vault.ByosStorageProvider.LOCAL_SAF_SYNCED_FOLDER
+      )
+
+      assertTrue("BYOS directory sync must succeed: ${syncReport.summary}", syncReport.success)
+      assertEquals(4, syncReport.foldersVerified.size)
+      assertEquals(3, syncReport.filesWritten)
+      assertEquals(1, syncReport.coldVaultFilesFound)
+
+      val ecoRoot = java.io.File(tempRoot, com.example.model.vault.ByosFolderLayout.ROOT_FOLDER)
+      assertTrue(java.io.File(ecoRoot, "Vault/vault_catalog.json").isFile)
+      assertTrue(java.io.File(ecoRoot, "Skins/active_skin.json").isFile)
+      assertTrue(java.io.File(ecoRoot, "ColdVault/${localColdFile.name}").isFile)
+      assertTrue(java.io.File(ecoRoot, "Exports").isDirectory)
+
+      val readReport = com.example.model.vault.ByosCloudFolderManager.readWorkspaceFromDirectory(
+        rootDir = tempRoot,
+        provider = com.example.model.vault.ByosStorageProvider.LOCAL_SAF_SYNCED_FOLDER
+      )
+
+      assertTrue("BYOS directory read must succeed: ${readReport.summary}", readReport.success)
+      assertEquals(4, readReport.foldersVerified.size)
+      assertEquals(3, readReport.filesRead)
+      assertEquals(1, readReport.catalogEntryCountFound)
+      assertEquals(1, readReport.coldVaultFilesFound)
+      assertNotNull("Active skin manifest must be read back", readReport.syncedSkinManifest)
+      assertEquals("mpv-byos-test-skin", readReport.syncedSkinManifest?.skinId)
+      assertEquals("vault_entry_001", readReport.syncedSkinManifest?.slotBindings?.get("hero_idle_sheet"))
+    } finally {
+      localColdFile.delete()
+      tempRoot.deleteRecursively()
+    }
+  }
 }
 
 

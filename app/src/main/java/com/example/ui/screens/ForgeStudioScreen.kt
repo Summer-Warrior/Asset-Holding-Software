@@ -80,6 +80,8 @@ import com.example.ai.PromptAssetPreset
 import com.example.ai.PromptHardwareTier
 import com.example.model.importer.UniversalAssetImporter
 import com.example.ui.components.AiFileImportReviewCard
+import com.example.ui.components.AutoStyleAuditToggleRow
+import com.example.ui.components.AutoStyleAuditVerdictStrip
 import com.example.ui.components.GeminiEnhancementPanel
 import com.example.ui.components.QuickAddToGalleryBar
 import com.example.ui.components.RoomAssetHistoryPanel
@@ -463,6 +465,13 @@ fun ForgeStudioScreen(
                             }
                         }
 
+                        // Automatic Closed-Loop Style Audit & 1-Pass Repair Toggle
+                        AutoStyleAuditToggleRow(
+                            enabled = uiState.autoRetryAiStyleGate,
+                            onToggle = { viewModel.toggleAutoRetryAiStyleGate() },
+                            testTag = "scratch_auto_audit_repair_switch"
+                        )
+
                         // Primary From-Scratch AI Generate CTA
                         Button(
                             onClick = { viewModel.createBrandNewAssetFromScratchWithAi(alsoExtrude3D) },
@@ -595,6 +604,15 @@ fun ForgeStudioScreen(
                                     }
                                 }
                             }
+                        }
+
+                        // Automatic Style Check Verdict Strip (shows immediately after AI generation)
+                        if (uiState.lastAssetAuditReport != null) {
+                            AutoStyleAuditVerdictStrip(
+                                report = uiState.lastAssetAuditReport,
+                                repairNote = uiState.lastAiAutoRepairNote,
+                                testTag = "scratch_auto_style_verdict_strip"
+                            )
                         }
 
                         // Offline Direct-Draw Alternative CTA

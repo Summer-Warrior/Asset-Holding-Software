@@ -3,10 +3,13 @@ package com.example.ai
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.util.Log
+import com.example.model.hardware.ConsoleHardwareCatalog
 import com.example.model.hardware.ConsoleHardwareSpec
 import com.example.model.importer.UniversalAssetImporter
 import com.example.model.model3d.Mesh3D
 import com.example.model.sprite.SpriteSheetData
+import kotlinx.coroutines.CancellationException
 import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.max
@@ -34,6 +37,26 @@ data class AssetAuditReport(
     val improvementsSummary: List<String>,
     val regressionOrIpFlags: List<String>,
     val auditSource: String
+) {
+    val styleFidelityScorePercent: Float
+        get() = styleFidelityScore.toFloat()
+
+    val chromaBleedDetected: Boolean
+        get() = !chromaAndAlphaClean
+
+    val issues: List<String>
+        get() = regressionOrIpFlags
+}
+
+/**
+ * Result of running the closed-loop automatic AI style gate with optional 1-pass auto-repair.
+ */
+data class AutoStyleGateResult(
+    val finalBitmap: Bitmap,
+    val auditReport: AssetAuditReport,
+    val autoRepairAttempted: Boolean,
+    val autoRepairImprovedScore: Boolean,
+    val correctionDirectiveUsed: String = ""
 )
 
 /**
@@ -533,5 +556,257 @@ object CanonicalAssetAndCodeAuditor {
             quantizedUniqueColors = uniqueBuckets.size,
             highContrastEdgeRatio = ratio
         )
+    }
+
+    /**
+     * Deterministic closed-loop asset auditor calibrated for [PromptHardwareTier], custom
+     * [expectedChromaKeyHex] border bleed detection, and bold-ink cel-shading silhouette contrast.
+     */
+    fun auditAsset(
+        bitmap: Bitmap,
+        assetName: String,
+        promptUsed: String,
+        hardwareTier: PromptHardwareTier = PromptHardwareTier.ARCADE_32BIT_60FPS,
+        expectedChromaKeyHex: String = "#FF00FF",
+        referenceBitmap: Bitmap? = null,
+        intendedForPublicRelease: Boolean = false
+    ): AssetAuditReport {
+        val targetHardware = resolveHardwareSpecForTier(hardwareTier)
+        val baseReport = auditAssetLocally(
+            generatedBitmap = bitmap,
+            referenceBitmapOrNull = referenceBitmap,
+            targetHardware = targetHardware,
+            intendedForPublicRelease = intendedForPublicRelease
+        )
+
+        val improvements = baseReport.improvementsSummary.toMutableList()
+        val flags = baseReport.regressionOrIpFlags.toMutableList()
+        var score = baseReport.styleFidelityScore
+        var chromaClean = baseReport.chromaAndAlphaClean
+
+        // Check custom expectedChromaKeyHex border bleed if not already flagged
+        if (chromaClean && expectedChromaKeyHex.isNotBlank()) {
+            val expectedKeyColor = parseHexColorOrNull(expectedChromaKeyHex)
+            if (expectedKeyColor != null && inspectCustomBorderChromaBleed(bitmap, expectedKeyColor)) {
+                chromaClean = false
+                score -= 18
+                flags.add(
+                    "Unstripped expected chroma-key border ($expectedChromaKeyHex) detected on '$assetName'. Strip chroma-key background cleanly."
+                )
+            }
+        }
+
+        // Enforce crisp silhouette & cel-shading contrast (penalize flat, low-contrast / washed-out renders)
+        val colorStats = analyzeQuantizedColorsAndContrast(bitmap)
+        if (colorStats.highContrastEdgeRatio < 0.03f) {
+            score -= 12
+            flags.add(
+                "Low silhouette contrast (${(colorStats.highContrastEdgeRatio * 100f).roundToInt()}% edge ratio) — strengthen bold black ink lineart and hard 2-step cel-shading."
+            )
+        } else if (promptUsed.isNotBlank()) {
+            improvements.add(
+                "Prompt-aligned silhouette for '$assetName' passed ${hardwareTier.displayName} contrast gate (${(colorStats.highContrastEdgeRatio * 100f).roundToInt()}% edge contrast)."
+            )
+        }
+
+        val finalScore = score.coerceIn(0, 100)
+        val finalTag = when {
+            referenceBitmap != null && baseReport.visualDeltaPercent < 15 -> AssetFidelityTag.NEEDS_REVISION
+            referenceBitmap != null && intendedForPublicRelease -> AssetFidelityTag.NEEDS_REVISION
+            !chromaClean || finalScore < 68 -> AssetFidelityTag.NEEDS_REVISION
+            referenceBitmap != null -> AssetFidelityTag.PRIVATE_FAN_DERIVED
+            else -> AssetFidelityTag.PUBLIC_CLEAN_ROOM
+        }
+
+        return baseReport.copy(
+            styleFidelityScore = finalScore,
+            chromaAndAlphaClean = chromaClean,
+            fidelityTag = finalTag,
+            improvementsSummary = improvements.distinct(),
+            regressionOrIpFlags = flags.distinct(),
+            auditSource = "Automatic Closed-Loop Style Gate (${hardwareTier.displayName})"
+        )
+    }
+
+    /**
+     * Converts [AssetAuditReport] findings into a concise, deterministic style-correction
+     * instruction suitable for a 1-pass AI image auto-repair prompt.
+     */
+    fun buildStyleCorrectionDirective(report: AssetAuditReport): String {
+        val directives = mutableListOf<String>()
+        if (report.chromaBleedDetected) {
+            directives.add(
+                "CHROMA-KEY CLEANUP: Isolate the subject completely on a solid, flat, unshaded key background with razor-sharp opaque edges, zero colored halo/spill, and zero background gradients or shadows."
+            )
+        }
+        if (report.styleFidelityScorePercent < 75f || report.issues.any { it.contains("contrast", ignoreCase = true) }) {
+            directives.add(
+                "SILHOUETTE & CEL-SHADING BOOST: Enforce crisp bold black ink outlines (2px equivalent), hard 2-step cel-shading with deep ink-pool shadows, punchy high-contrast color-blocking, and unmistakable silhouette readability."
+            )
+        }
+        if (!report.hardwareBudgetCompliant) {
+            directives.add(
+                "HARDWARE PALETTE & TILE BUDGET: Reduce color count into tight, quantized color ramps with clean pixel clusters and no muddy airbrush gradients or soft blur."
+            )
+        }
+        if (report.issues.any { it.contains("Visual Delta", ignoreCase = true) || it.contains("IP Guard", ignoreCase = true) }) {
+            directives.add(
+                "ORIGINAL CLEAN-ROOM REDESIGN: Substantially transform silhouette proportions, armor trim, and pose so the sprite is unmistakably original clean-room art."
+            )
+        }
+        report.issues.take(3).forEach { issue ->
+            directives.add("FIX REQUIRED: $issue")
+        }
+        if (directives.isEmpty()) {
+            directives.add("Maintain crisp black ink outlines, clean alpha boundary, and high-contrast 2-step cel-shading.")
+        }
+        return directives.joinToString(separator = "\n")
+    }
+
+    /**
+     * Runs the closed-loop automatic style gate on [initialBitmap].
+     * When [allowSingleAutoRepair] is true and the initial audit fails (`NEEDS_REVISION`,
+     * score < 68%, or chroma bleed detected), triggers at most ONE [repairGenerator] pass
+     * with [buildStyleCorrectionDirective], re-audits the repaired bitmap, and keeps whichever
+     * result scores higher (preferring zero chroma bleed on ties).
+     */
+    suspend fun runClosedLoopStyleGate(
+        initialBitmap: Bitmap,
+        assetName: String,
+        promptUsed: String,
+        hardwareTier: PromptHardwareTier,
+        expectedChromaKeyHex: String,
+        referenceBitmap: Bitmap? = null,
+        allowSingleAutoRepair: Boolean = true,
+        repairGenerator: (suspend (correctionDirective: String) -> Bitmap?)? = null
+    ): AutoStyleGateResult {
+        val initialReport = auditAsset(
+            bitmap = initialBitmap,
+            assetName = assetName,
+            promptUsed = promptUsed,
+            hardwareTier = hardwareTier,
+            expectedChromaKeyHex = expectedChromaKeyHex,
+            referenceBitmap = referenceBitmap
+        )
+
+        val failedStyleGate = initialReport.fidelityTag == AssetFidelityTag.NEEDS_REVISION ||
+            initialReport.styleFidelityScorePercent < 68f ||
+            initialReport.chromaBleedDetected
+
+        if (!allowSingleAutoRepair || !failedStyleGate || repairGenerator == null) {
+            return AutoStyleGateResult(
+                finalBitmap = initialBitmap,
+                auditReport = initialReport,
+                autoRepairAttempted = false,
+                autoRepairImprovedScore = false,
+                correctionDirectiveUsed = ""
+            )
+        }
+
+        val correctionDirective = buildStyleCorrectionDirective(initialReport)
+        val repairedBitmap: Bitmap? = try {
+            repairGenerator.invoke(correctionDirective)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            Log.w("CanonicalAuditor", "1-pass auto-repair generation failed for '$assetName': ${e.message}", e)
+            null
+        }
+
+        if (repairedBitmap == null) {
+            return AutoStyleGateResult(
+                finalBitmap = initialBitmap,
+                auditReport = initialReport,
+                autoRepairAttempted = true,
+                autoRepairImprovedScore = false,
+                correctionDirectiveUsed = correctionDirective
+            )
+        }
+
+        val repairedReport = auditAsset(
+            bitmap = repairedBitmap,
+            assetName = assetName,
+            promptUsed = promptUsed,
+            hardwareTier = hardwareTier,
+            expectedChromaKeyHex = expectedChromaKeyHex,
+            referenceBitmap = referenceBitmap
+        )
+
+        val repairWon = when {
+            repairedReport.styleFidelityScorePercent > initialReport.styleFidelityScorePercent -> true
+            repairedReport.styleFidelityScorePercent < initialReport.styleFidelityScorePercent -> false
+            else -> !repairedReport.chromaBleedDetected && initialReport.chromaBleedDetected
+        }
+
+        return if (repairWon) {
+            AutoStyleGateResult(
+                finalBitmap = repairedBitmap,
+                auditReport = repairedReport,
+                autoRepairAttempted = true,
+                autoRepairImprovedScore = true,
+                correctionDirectiveUsed = correctionDirective
+            )
+        } else {
+            AutoStyleGateResult(
+                finalBitmap = initialBitmap,
+                auditReport = initialReport,
+                autoRepairAttempted = true,
+                autoRepairImprovedScore = false,
+                correctionDirectiveUsed = correctionDirective
+            )
+        }
+    }
+
+    private fun resolveHardwareSpecForTier(tier: PromptHardwareTier): ConsoleHardwareSpec {
+        val targetId = when (tier) {
+            PromptHardwareTier.PIXEL_16BIT -> "snes"
+            PromptHardwareTier.ARCADE_32BIT_60FPS -> "ps1"
+            PromptHardwareTier.TRUE_FUSION_HD -> "switch"
+        }
+        return ConsoleHardwareCatalog.allSystemsWithFusions().firstOrNull { it.id.equals(targetId, ignoreCase = true) }
+            ?: ConsoleHardwareCatalog.getById("ps1")
+    }
+
+    private fun parseHexColorOrNull(hex: String): Int? {
+        return try {
+            val clean = hex.trim().let { if (it.startsWith("#")) it else "#$it" }
+            if (clean.length == 7 || clean.length == 9) Color.parseColor(clean) else null
+        } catch (e: Exception) {
+            Log.w("CanonicalAuditor", "Ignoring invalid expectedChromaKeyHex '$hex': ${e.message}")
+            null
+        }
+    }
+
+    private fun inspectCustomBorderChromaBleed(bitmap: Bitmap, keyColor: Int): Boolean {
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w <= 0 || h <= 0) return false
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+
+        var borderTotal = 0
+        var bleedCount = 0
+        fun check(x: Int, y: Int) {
+            val px = pixels[y * w + x]
+            borderTotal++
+            if (
+                Color.alpha(px) >= 240 &&
+                abs(Color.red(px) - Color.red(keyColor)) <= CHROMA_TOLERANCE &&
+                abs(Color.green(px) - Color.green(keyColor)) <= CHROMA_TOLERANCE &&
+                abs(Color.blue(px) - Color.blue(keyColor)) <= CHROMA_TOLERANCE
+            ) {
+                bleedCount++
+            }
+        }
+        for (x in 0 until w) {
+            check(x, 0)
+            if (h > 1) check(x, h - 1)
+        }
+        for (y in 1 until h - 1) {
+            check(0, y)
+            if (w > 1) check(w - 1, y)
+        }
+        val threshold = max(2, (borderTotal * 0.05f).roundToInt())
+        return bleedCount >= threshold
     }
 }

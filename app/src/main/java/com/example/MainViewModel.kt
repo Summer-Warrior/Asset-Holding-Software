@@ -99,6 +99,10 @@ import com.example.model.texture.ProceduralTextures
 import com.example.model.texture.ScratchTextureEngine
 import com.example.model.texture.ScratchTextureProject
 import com.example.model.texture.TexturePreset
+import com.example.model.vault.ByosCloudFolderManager
+import com.example.model.vault.ByosStorageProvider
+import com.example.model.vault.ByosSyncReport
+import com.example.model.vault.ByosWorkspaceConfig
 import com.example.model.vault.ColdVaultEndpointConfig
 import com.example.model.vault.EncryptedColdVaultManager
 import com.example.model.vault.HotCacheStats
@@ -234,7 +238,13 @@ data class AppUiState(
     val scratch3DProject: Scratch3DProject = Scratch3DBuilderEngine.createEmptyProject("New Original 3D Model"),
     val scratchTextureProject: ScratchTextureProject = ScratchTextureEngine.createBlankTexture("New Original Texture", 32),
     val activeTextureBrushColorInt: Int = Color.rgb(0x00, 0xE5, 0xFF),
-    val activeTextureBrushSizePx: Int = 1
+    val activeTextureBrushSizePx: Int = 1,
+    // Closed-Loop AI Style Auditing & 1-Pass Auto-Repair
+    val autoRetryAiStyleGate: Boolean = true,
+    val lastAiAutoRepairNote: String? = null,
+    // BYOS (Bring-Your-Own-Storage) Personal Cloud / SAF Folder Workspace
+    val byosWorkspaceConfig: ByosWorkspaceConfig = ByosWorkspaceConfig(),
+    val lastByosSyncReport: ByosSyncReport? = null
 )
 
 class MainViewModel(
@@ -467,6 +477,7 @@ class MainViewModel(
                 val loadedSkin = VaultSettingsAndCatalogStore.loadActiveSkinManifest(context)
                 val loadedEndpoint = VaultSettingsAndCatalogStore.loadEndpointConfig(context)
                 val pinConfigured = VaultSettingsAndCatalogStore.isPinConfigured(context)
+                val loadedByosConfig = ByosCloudFolderManager.loadConfig(context)
                 val stats = HotPhoneLruCacheManager.computeStats(loadedCatalog)
                 _uiState.update { state ->
                     state.copy(
@@ -475,7 +486,8 @@ class MainViewModel(
                         hotCacheStats = stats,
                         coldVaultEndpointConfig = loadedEndpoint,
                         isVaultPinConfigured = pinConfigured,
-                        isVaultUnlocked = !pinConfigured
+                        isVaultUnlocked = !pinConfigured,
+                        byosWorkspaceConfig = loadedByosConfig
                     )
                 }
             } catch (e: Exception) {
@@ -2013,7 +2025,7 @@ class MainViewModel(
                     queryHint = "${snapshot.promptText} ${snapshot.geminiCustomInstruction} ${snapshot.activeCharacterTagForImports}",
                     maxChars = MultiSourceContextRegistry.DEFAULT_MAX_CONTEXT_CHARS
                 )
-                val report = if (mode == GeminiOperationMode.AI_IMAGE_SYNTHESIS) {
+                val rawReport = if (mode == GeminiOperationMode.AI_IMAGE_SYNTHESIS) {
                     GeminiAssetForge.synthesizeAiVariantImageWithGemini(
                         promptDescription = snapshot.promptText,
                         customInstruction = snapshot.geminiCustomInstruction,
@@ -2022,7 +2034,10 @@ class MainViewModel(
                         theme = snapshot.selectedTheme,
                         hardwareName = snapshot.selectedHardware.name,
                         explicitCharacterTag = snapshot.activeCharacterTagForImports,
-                        sharedContextBlock = sharedContext
+                        sharedContextBlock = sharedContext,
+                        hardwareTier = snapshot.promptHardwareTier,
+                        autoStripChromaKey = snapshot.stripSolidBgOnImport,
+                        autoRetryOnStyleFail = snapshot.autoRetryAiStyleGate
                     )
                 } else {
                     GeminiAssetForge.enhanceOrGenerateVariantsWithGemini(
@@ -2040,6 +2055,25 @@ class MainViewModel(
                     )
                 }
 
+                // Ensure every AI enhancement/variant flow runs automatic deterministic style auditing
+                val autoAudit = rawReport.autoAuditReport ?: rawReport.primarySpriteSheet.frames.firstOrNull()?.let { frameBmp ->
+                    CanonicalAssetAndCodeAuditor.auditAsset(
+                        bitmap = frameBmp,
+                        assetName = rawReport.enhancedTitle,
+                        promptUsed = "${snapshot.promptText} ${snapshot.geminiCustomInstruction}".trim(),
+                        hardwareTier = snapshot.promptHardwareTier,
+                        expectedChromaKeyHex = "#FF00FF",
+                        referenceBitmap = inputBitmap
+                    )
+                }
+                val report = rawReport.copy(autoAuditReport = autoAudit)
+                val repairNote = formatAutoStyleRepairNote(
+                    report = autoAudit,
+                    attempted = report.autoRepairAttempted,
+                    improved = report.autoRepairImprovedScore
+                )
+                val auditMetricsTag = autoAudit?.let { " • Audit ${it.styleFidelityScore}% (${it.fidelityTag.badge})" } ?: ""
+
                 val libEntry = SavedLibraryAsset(
                     id = "lib_gemini_${System.currentTimeMillis()}",
                     title = report.enhancedTitle,
@@ -2049,7 +2083,7 @@ class MainViewModel(
                     spriteSheet = report.primarySpriteSheet,
                     textureBitmap = report.aiSynthesizedBitmap ?: snapshot.activeTexture,
                     hardwareBadge = snapshot.selectedHardware.shortName,
-                    metricsSummary = "${report.primaryMesh.vertexCount}v/${report.primaryMesh.faceCount}f • ${report.variants.size} AI Variants",
+                    metricsSummary = "${report.primaryMesh.vertexCount}v/${report.primaryMesh.faceCount}f • ${report.variants.size} AI Variants$auditMetricsTag",
                     sourceBadge = "GEMINI AI",
                     formatSummary = report.modelNameUsed
                 )
@@ -2060,13 +2094,15 @@ class MainViewModel(
                         geminiForgeState = GeminiForgeUiState.Success(report),
                         geminiGeneratedVariants = report.variants,
                         lastGeminiReport = report,
+                        lastAssetAuditReport = autoAudit ?: state.lastAssetAuditReport,
+                        lastAiAutoRepairNote = repairNote ?: state.lastAiAutoRepairNote,
                         currentMesh = report.primaryMesh,
                         currentSpriteSheet = report.primarySpriteSheet,
                         conceptArtBitmap = report.aiSynthesizedBitmap ?: state.conceptArtBitmap,
                         extractedPalette = report.enhancedPalette.ifEmpty { state.extractedPalette },
                         activeCharacterTagForImports = report.characterIdentity,
                         savedLibraryAssets = listOf(libEntry) + state.savedLibraryAssets,
-                        statusMessage = "Gemini (${report.modelNameUsed}): Enhanced '${report.enhancedTitle}' & generated ${report.variants.size} variants!"
+                        statusMessage = "Gemini (${report.modelNameUsed}): Enhanced '${report.enhancedTitle}' & generated ${report.variants.size} variants$auditMetricsTag!"
                     )
                 }
 
@@ -2097,7 +2133,7 @@ class MainViewModel(
                     assetType = "GEMINI_VARIANT",
                     sourceOrigin = "GEMINI AI (${report.modelNameUsed})",
                     hardwareTarget = snapshot.selectedHardware.shortName,
-                    metricsSummary = "${report.primaryMesh.vertexCount}v/${report.primaryMesh.faceCount}f • ${report.variants.size} AI Variants",
+                    metricsSummary = "${report.primaryMesh.vertexCount}v/${report.primaryMesh.faceCount}f • ${report.variants.size} AI Variants$auditMetricsTag",
                     mesh = report.primaryMesh,
                     spriteSheet = report.primarySpriteSheet,
                     paletteHexList = report.enhancedPalette.map { it.hex }
@@ -4267,8 +4303,17 @@ class MainViewModel(
                     characterTag = activeChar,
                     sharedContextBlock = sharedContextBlock,
                     autoStripChromaKey = snapshot.stripSolidBgOnImport,
-                    alsoExtrude3D = alsoExtrude3D
+                    alsoExtrude3D = alsoExtrude3D,
+                    autoRetryOnStyleFail = snapshot.autoRetryAiStyleGate
                 )
+
+                val audit = result.autoAuditReport
+                val repairNote = formatAutoStyleRepairNote(
+                    report = audit,
+                    attempted = result.autoRepairAttempted,
+                    improved = result.autoRepairImprovedScore
+                )
+                val auditMetricsTag = audit?.let { " • Audit ${it.styleFidelityScore}% (${it.fidelityTag.badge})" } ?: ""
 
                 val savedType = if (result.extrudedMeshOrNull != null) {
                     LibraryAssetType.UNIFIED_PAIR
@@ -4285,7 +4330,7 @@ class MainViewModel(
                     mesh = result.extrudedMeshOrNull,
                     spriteSheet = result.spriteSheet,
                     hardwareBadge = snapshot.selectedHardware.shortName,
-                    metricsSummary = "${result.spriteSheet.frameWidth}×${result.spriteSheet.frameHeight}px • ${result.spriteSheet.frames.size}f • ${result.modelUsed}"
+                    metricsSummary = "${result.spriteSheet.frameWidth}×${result.spriteSheet.frameHeight}px • ${result.spriteSheet.frames.size}f • ${result.modelUsed}$auditMetricsTag"
                 )
 
                 val updatedRig = RigMetadata.defaultForSprite(
@@ -4300,11 +4345,13 @@ class MainViewModel(
                         isCreatingFromScratchWithAi = false,
                         lastScratchAiError = null,
                         lastScratchAiCreationBitmap = result.rawGeneratedBitmap,
+                        lastAssetAuditReport = audit ?: state.lastAssetAuditReport,
+                        lastAiAutoRepairNote = repairNote ?: state.lastAiAutoRepairNote,
                         currentSpriteSheet = result.spriteSheet,
                         currentMesh = result.extrudedMeshOrNull ?: state.currentMesh,
                         activeRigMetadata = updatedRig,
                         savedLibraryAssets = listOf(savedEntry) + state.savedLibraryAssets,
-                        statusMessage = "Created '${result.title}' from scratch via ${result.modelUsed} (${result.spriteSheet.frames.size}f, key ${result.chromaKeyHex})!"
+                        statusMessage = "Created '${result.title}' from scratch via ${result.modelUsed} (${result.spriteSheet.frames.size}f, key ${result.chromaKeyHex}$auditMetricsTag)!"
                     )
                 }
 
@@ -4314,7 +4361,7 @@ class MainViewModel(
                     assetType = if (result.extrudedMeshOrNull != null) "FUSED_3D_2D" else "SPRITE_2D",
                     sourceOrigin = "AI SCRATCH CREATION",
                     hardwareTarget = snapshot.selectedHardware.shortName,
-                    metricsSummary = "${result.spriteSheet.frameWidth}×${result.spriteSheet.frameHeight}px • ${result.spriteSheet.frames.size}f • ${result.modelUsed}",
+                    metricsSummary = "${result.spriteSheet.frameWidth}×${result.spriteSheet.frameHeight}px • ${result.spriteSheet.frames.size}f • ${result.modelUsed}$auditMetricsTag",
                     mesh = result.extrudedMeshOrNull,
                     spriteSheet = result.spriteSheet,
                     paletteHexList = paletteHexes,
@@ -4748,6 +4795,140 @@ class MainViewModel(
                 Log.w("MainViewModel", "Failed to audition custom sequence: ${e.message}")
                 postStatusMessage("Unable to audition sequence: ${e.message}")
             }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Closed-Loop AI Style Auditing & BYOS Personal Cloud / SAF Folder Actions
+    // -------------------------------------------------------------------------
+
+    fun toggleAutoRetryAiStyleGate() {
+        _uiState.update { state ->
+            val next = !state.autoRetryAiStyleGate
+            state.copy(
+                autoRetryAiStyleGate = next,
+                statusMessage = if (next) {
+                    "Automatic Style Audit & 1-Pass Auto-Repair enabled."
+                } else {
+                    "Automatic 1-Pass Style Repair paused (audit still runs on every AI creation)."
+                }
+            )
+        }
+    }
+
+    private fun formatAutoStyleRepairNote(
+        report: AssetAuditReport?,
+        attempted: Boolean,
+        improved: Boolean
+    ): String? {
+        if (report == null) return null
+        return when {
+            attempted && improved ->
+                "1-Pass Auto-Repair succeeded: improved Style Score to ${report.styleFidelityScore}% (${report.fidelityTag.badge})."
+            attempted ->
+                "1-Pass Auto-Repair attempted: kept highest-scoring render at ${report.styleFidelityScore}% (${report.fidelityTag.badge})."
+            else ->
+                "Auto-audited directly: ${report.styleFidelityScore}% (${report.fidelityTag.badge}) • ${if (report.chromaBleedDetected) "Chroma bleed flagged" else "Alpha clean"}."
+        }
+    }
+
+    fun mountByosSafFolder(context: Context, treeUri: Uri) {
+        val appCtx = context.applicationContext
+        viewModelScope.launch(Dispatchers.IO) {
+            val currentCfg = _uiState.value.byosWorkspaceConfig
+            val (updatedConfig, report) = ByosCloudFolderManager.mountSafTreeUri(
+                context = appCtx,
+                treeUri = treeUri,
+                existingConfig = currentCfg
+            )
+            _uiState.update { state ->
+                state.copy(
+                    byosWorkspaceConfig = updatedConfig,
+                    lastByosSyncReport = report,
+                    statusMessage = report.summary
+                )
+            }
+        }
+    }
+
+    fun syncVaultToByosFolder(context: Context) {
+        val appCtx = context.applicationContext
+        val snapshot = _uiState.value
+        viewModelScope.launch(Dispatchers.IO) {
+            val report = ByosCloudFolderManager.syncLocalVaultToSafTree(
+                context = appCtx,
+                config = snapshot.byosWorkspaceConfig,
+                catalog = snapshot.vaultCatalog,
+                activeSkin = snapshot.activeSkinManifest
+            )
+            val refreshedConfig = ByosCloudFolderManager.loadConfig(appCtx)
+            _uiState.update { state ->
+                state.copy(
+                    byosWorkspaceConfig = refreshedConfig,
+                    lastByosSyncReport = report,
+                    statusMessage = report.summary
+                )
+            }
+        }
+    }
+
+    fun readVaultFromByosFolder(context: Context) {
+        val appCtx = context.applicationContext
+        val snapshot = _uiState.value
+        viewModelScope.launch(Dispatchers.IO) {
+            val report = ByosCloudFolderManager.readVaultAndSkinFromSafTree(
+                context = appCtx,
+                config = snapshot.byosWorkspaceConfig
+            )
+            val loadedSkin = report.syncedSkinManifest
+            if (loadedSkin != null) {
+                VaultSettingsAndCatalogStore.saveActiveSkinManifest(appCtx, loadedSkin)
+            }
+            _uiState.update { state ->
+                state.copy(
+                    activeSkinManifest = loadedSkin ?: state.activeSkinManifest,
+                    lastByosSyncReport = report,
+                    statusMessage = report.summary
+                )
+            }
+        }
+    }
+
+    fun updateByosProviderAndHubConfig(
+        context: Context,
+        provider: ByosStorageProvider,
+        masterHubEmail: String,
+        autoSyncOnImport: Boolean
+    ) {
+        val appCtx = context.applicationContext
+        val updated = _uiState.value.byosWorkspaceConfig.copy(
+            provider = provider,
+            masterHubAccountEmail = masterHubEmail.trim(),
+            autoSyncOnImport = autoSyncOnImport
+        )
+        ByosCloudFolderManager.saveConfig(appCtx, updated)
+        _uiState.update { state ->
+            state.copy(
+                byosWorkspaceConfig = updated,
+                statusMessage = "Saved BYOS Workspace target: ${provider.label}${if (updated.masterHubAccountEmail.isNotBlank()) " (${updated.masterHubAccountEmail})" else ""}."
+            )
+        }
+    }
+
+    fun disconnectByosFolder(context: Context) {
+        val appCtx = context.applicationContext
+        val cleared = _uiState.value.byosWorkspaceConfig.copy(
+            persistedTreeUri = "",
+            displayFolderName = "",
+            lastSyncEpochMs = 0L
+        )
+        ByosCloudFolderManager.saveConfig(appCtx, cleared)
+        _uiState.update { state ->
+            state.copy(
+                byosWorkspaceConfig = cleared,
+                lastByosSyncReport = null,
+                statusMessage = "Disconnected personal SAF workspace folder."
+            )
         }
     }
 

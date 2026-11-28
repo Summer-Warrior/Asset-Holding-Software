@@ -417,6 +417,13 @@ fun GeminiEnhancementPanel(
                 }
             }
 
+            // Automatic Closed-Loop Style Audit & 1-Pass Repair Toggle
+            AutoStyleAuditToggleRow(
+                enabled = uiState.autoRetryAiStyleGate,
+                onToggle = { viewModel.toggleAutoRetryAiStyleGate() },
+                testTag = "gemini_auto_audit_repair_switch"
+            )
+
             // Primary Gemini Action Buttons Row
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -611,6 +618,13 @@ fun GeminiEnhancementPanel(
                                 )
                             }
                         }
+
+                        // Automatic Closed-Loop Style Check Verdict Strip
+                        AutoStyleAuditVerdictStrip(
+                            report = report.autoAuditReport ?: uiState.lastAssetAuditReport,
+                            repairNote = uiState.lastAiAutoRepairNote,
+                            testTag = "gemini_auto_style_verdict_strip"
+                        )
 
                         // Quick Navigation to Inspect Enhanced Primary in 3D or 2D Studio
                         Row(

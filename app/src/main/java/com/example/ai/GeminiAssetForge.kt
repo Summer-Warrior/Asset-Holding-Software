@@ -109,7 +109,10 @@ data class GeminiForgeReport(
     val variants: List<GeminiAssetVariant>,
     val aiSynthesizedBitmap: Bitmap? = null,
     val usedImageInput: Boolean = false,
-    val modelNameUsed: String = "gemini-3.8-flash"
+    val modelNameUsed: String = "gemini-3.8-flash",
+    val autoAuditReport: AssetAuditReport? = null,
+    val autoRepairAttempted: Boolean = false,
+    val autoRepairImprovedScore: Boolean = false
 )
 
 sealed interface GeminiForgeUiState {
@@ -127,7 +130,8 @@ data class GenerationResult(
 )
 
 /**
- * Output of a pure from-scratch AI asset creation run (zero reference image, zero fallback sample substitution).
+ * Output of a pure from-scratch AI asset creation run (zero reference image, zero fallback sample substitution),
+ * automatically audited via [CanonicalAssetAndCodeAuditor.runClosedLoopStyleGate].
  */
 data class BrandNewAssetResult(
     val title: String,
@@ -136,7 +140,21 @@ data class BrandNewAssetResult(
     val rawGeneratedBitmap: Bitmap,
     val chromaKeyHex: String,
     val modelUsed: String,
-    val promptUsed: String
+    val promptUsed: String,
+    val autoAuditReport: AssetAuditReport? = null,
+    val autoRepairAttempted: Boolean = false,
+    val autoRepairImprovedScore: Boolean = false
+)
+
+/**
+ * Result of generating and closed-loop style-auditing a visual variant bitmap.
+ */
+data class AuditedVisualVariantResult(
+    val bitmap: Bitmap,
+    val modelUsed: String,
+    val auditReport: AssetAuditReport,
+    val autoRepairAttempted: Boolean,
+    val autoRepairImprovedScore: Boolean
 )
 
 object GeminiAssetForge {
@@ -334,9 +352,88 @@ object GeminiAssetForge {
     }
 
     /**
-     * Uses `gemini-nano-banana-2.1` to synthesize or edit a game asset image at runtime from an imported
-     * asset image + edit instruction (image-to-image) or from a text description (text-to-image),
-     * and automatically builds matching 3D Relief Mesh, 2D Spritesheet, and studio variants.
+     * Generates a visual variant image via [OmniAiRouter.generateImageBitmap] and automatically runs
+     * [CanonicalAssetAndCodeAuditor.runClosedLoopStyleGate] with optional 1-pass style auto-repair.
+     */
+    suspend fun generateAuditedVisualVariantImage(
+        prompt: String,
+        referenceBitmap: Bitmap?,
+        assetName: String,
+        hardwareTier: PromptHardwareTier = PromptHardwareTier.ARCADE_32BIT_60FPS,
+        expectedChromaKeyHex: String = "#FF00FF",
+        sharedContextBlock: String = "",
+        autoStripChromaKey: Boolean = true,
+        autoRetryOnStyleFail: Boolean = true
+    ): AuditedVisualVariantResult {
+        suspend fun invokeImageProvider(activePrompt: String): Pair<Bitmap, String> {
+            val omniImage = OmniAiRouter.generateImageBitmap(
+                prompt = activePrompt,
+                referenceBitmap = referenceBitmap,
+                sharedContextBlock = sharedContextBlock,
+                firebaseImageDelegate = { combinedPrompt, refBmp ->
+                    withTimeout(60_000L) {
+                        val response = if (refBmp != null) {
+                            imageSynthesisModel.generateContent(
+                                content {
+                                    image(refBmp)
+                                    text(combinedPrompt)
+                                }
+                            )
+                        } else {
+                            imageSynthesisModel.generateContent(combinedPrompt)
+                        }
+                        response.candidates.firstOrNull()
+                            ?.content?.parts?.filterIsInstance<ImagePart>()
+                            ?.firstOrNull()?.image
+                    } ?: throw IllegalStateException("No image was returned by gemini-nano-banana-2.1.")
+                }
+            )
+            val resolvedLabel = if (omniImage.providerUsed == AiProviderType.FIREBASE_STUDIO) {
+                "gemini-nano-banana-2.1"
+            } else {
+                "${omniImage.providerUsed.name}:${omniImage.modelIdUsed}"
+            }
+            val cleaned = if (autoStripChromaKey) {
+                UniversalAssetImporter.stripChromaKeyBackground(omniImage.bitmap, tolerance = 42)
+            } else {
+                omniImage.bitmap
+            }
+            return cleaned to resolvedLabel
+        }
+
+        val (initialBitmap, resolvedModelLabel) = invokeImageProvider(prompt)
+        val gateResult = CanonicalAssetAndCodeAuditor.runClosedLoopStyleGate(
+            initialBitmap = initialBitmap,
+            assetName = assetName,
+            promptUsed = prompt,
+            hardwareTier = hardwareTier,
+            expectedChromaKeyHex = expectedChromaKeyHex,
+            referenceBitmap = referenceBitmap,
+            allowSingleAutoRepair = autoRetryOnStyleFail,
+            repairGenerator = { correctionDirective ->
+                val repairedPrompt = buildString {
+                    appendLine(prompt)
+                    appendLine()
+                    appendLine("[AUTOMATIC 1-PASS STYLE REPAIR DIRECTIVE]")
+                    appendLine(correctionDirective)
+                }
+                invokeImageProvider(repairedPrompt).first
+            }
+        )
+
+        return AuditedVisualVariantResult(
+            bitmap = gateResult.finalBitmap,
+            modelUsed = resolvedModelLabel,
+            auditReport = gateResult.auditReport,
+            autoRepairAttempted = gateResult.autoRepairAttempted,
+            autoRepairImprovedScore = gateResult.autoRepairImprovedScore
+        )
+    }
+
+    /**
+     * Uses `gemini-nano-banana-2.1` (or active [OmniAiRouter] image provider) to synthesize or edit a game
+     * asset image at runtime, runs [CanonicalAssetAndCodeAuditor.runClosedLoopStyleGate] automatically,
+     * and builds matching 3D Relief Mesh, 2D Spritesheet, and studio variants.
      */
     suspend fun synthesizeAiVariantImageWithGemini(
         promptDescription: String,
@@ -346,11 +443,14 @@ object GeminiAssetForge {
         theme: ArtTheme,
         hardwareName: String,
         explicitCharacterTag: String,
-        sharedContextBlock: String = ""
+        sharedContextBlock: String = "",
+        hardwareTier: PromptHardwareTier = PromptHardwareTier.ARCADE_32BIT_60FPS,
+        autoStripChromaKey: Boolean = true,
+        autoRetryOnStyleFail: Boolean = true
     ): GeminiForgeReport {
         val imagePrompt = buildString {
             append("Create a crisp, high-contrast video game character or vehicle asset sprite/concept illustration ")
-            append("in ${theme.displayName} style, optimized for $hardwareName aesthetics, centered on a clean dark background. ")
+            append("in ${theme.displayName} style, optimized for $hardwareName aesthetics, centered on a solid #FF00FF magenta chroma-key background. ")
             if (theme.styleDirective.isNotBlank()) {
                 append("${theme.styleDirective} ")
             }
@@ -371,38 +471,21 @@ object GeminiAssetForge {
             null
         }
 
-        val omniImage = OmniAiRouter.generateImageBitmap(
-            prompt = imagePrompt,
-            referenceBitmap = scaledRef,
-            sharedContextBlock = sharedContextBlock,
-            firebaseImageDelegate = { combinedPrompt, refBmp ->
-                withTimeout(60_000L) {
-                    val response = if (refBmp != null) {
-                        imageSynthesisModel.generateContent(
-                            content {
-                                image(refBmp)
-                                text(combinedPrompt)
-                            }
-                        )
-                    } else {
-                        imageSynthesisModel.generateContent(combinedPrompt)
-                    }
-                    response.candidates.firstOrNull()
-                        ?.content?.parts?.filterIsInstance<ImagePart>()
-                        ?.firstOrNull()?.image
-                } ?: throw IllegalStateException("No image was returned by gemini-nano-banana-2.1.")
-            }
-        )
-
-        val generatedBitmap = omniImage.bitmap
-        val resolvedModelLabel = if (omniImage.providerUsed == AiProviderType.FIREBASE_STUDIO) {
-            "gemini-nano-banana-2.1"
-        } else {
-            "${omniImage.providerUsed.name}:${omniImage.modelIdUsed}"
-        }
-
         val charName = explicitCharacterTag.ifBlank { "Kaelen" }
         val enhancedTitle = "$charName • AI Visual Synthesis"
+        val auditedVisual = generateAuditedVisualVariantImage(
+            prompt = imagePrompt,
+            referenceBitmap = scaledRef,
+            assetName = enhancedTitle,
+            hardwareTier = hardwareTier,
+            expectedChromaKeyHex = "#FF00FF",
+            sharedContextBlock = sharedContextBlock,
+            autoStripChromaKey = autoStripChromaKey,
+            autoRetryOnStyleFail = autoRetryOnStyleFail
+        )
+
+        val generatedBitmap = auditedVisual.bitmap
+        val resolvedModelLabel = auditedVisual.modelUsed
         val extractedPalette = ConceptAnalysis.extractPalette(generatedBitmap, maxColors = 6)
         val primaryColor = extractedPalette.getOrNull(0)?.hex ?: "#00E5FF"
         val secondaryColor = extractedPalette.getOrNull(1)?.hex ?: "#1E293B"
@@ -469,11 +552,12 @@ object GeminiAssetForge {
             )
         )
 
+        val auditSummaryTag = "Style Audit ${auditedVisual.auditReport.styleFidelityScore}% (${auditedVisual.auditReport.fidelityTag.badge})"
         return GeminiForgeReport(
             operationMode = GeminiOperationMode.AI_IMAGE_SYNTHESIS,
             enhancedTitle = enhancedTitle,
             characterIdentity = charName,
-            technicalEnhancementSummary = "Synthesized a ${generatedBitmap.width}×${generatedBitmap.height}px visual asset via $resolvedModelLabel, extracted ${extractedPalette.size} dominant shader swatches, extruded a ${reliefMesh.vertexCount}-vertex 3D relief mesh, and quantized an outlined 2D sprite.",
+            technicalEnhancementSummary = "Synthesized a ${generatedBitmap.width}×${generatedBitmap.height}px visual asset via $resolvedModelLabel ($auditSummaryTag), extracted ${extractedPalette.size} dominant shader swatches, extruded a ${reliefMesh.vertexCount}-vertex 3D relief mesh, and quantized an outlined 2D sprite.",
             enhancedLoreSpec = "Generated from prompt: \"$promptDescription\" ${if (customInstruction.isNotBlank()) "with instruction: \"$customInstruction\"" else ""}.",
             primaryMesh = reliefMesh,
             primarySpriteSheet = synthesizedSheet,
@@ -481,15 +565,20 @@ object GeminiAssetForge {
             variants = variants,
             aiSynthesizedBitmap = generatedBitmap,
             usedImageInput = inputBitmap != null && inputSource != GeminiInputImageSource.DESCRIPTION_ONLY,
-            modelNameUsed = resolvedModelLabel
+            modelNameUsed = resolvedModelLabel,
+            autoAuditReport = auditedVisual.auditReport,
+            autoRepairAttempted = auditedVisual.autoRepairAttempted,
+            autoRepairImprovedScore = auditedVisual.autoRepairImprovedScore
         )
     }
 
     /**
      * Pure from-scratch AI sprite, animation sheet, portrait, or icon creation.
      * Always passes `referenceBitmap = null` into [OmniAiRouter.generateImageBitmap], strips solid/chroma-key
-     * backgrounds when [autoStripChromaKey] is enabled, slices into the preset's exact grid, foot-aligns
-     * multi-frame sheets, and never substitutes stock sample meshes if AI is offline.
+     * backgrounds when [autoStripChromaKey] is enabled, automatically audits via
+     * [CanonicalAssetAndCodeAuditor.runClosedLoopStyleGate] with optional 1-pass auto-repair,
+     * slices into the preset's exact grid, foot-aligns multi-frame sheets, and never substitutes
+     * stock sample meshes if AI is offline.
      */
     suspend fun createBrandNewAssetFromScratch(
         assetName: String,
@@ -503,7 +592,8 @@ object GeminiAssetForge {
         characterTag: String,
         sharedContextBlock: String = "",
         autoStripChromaKey: Boolean = true,
-        alsoExtrude3D: Boolean = false
+        alsoExtrude3D: Boolean = false,
+        autoRetryOnStyleFail: Boolean = true
     ): BrandNewAssetResult {
         val cleanSubject = subjectDescription.trim()
         if (cleanSubject.isBlank()) {
@@ -529,20 +619,22 @@ object GeminiAssetForge {
             characterTag = characterTag
         )
 
+        suspend fun generateScratchBitmap(activePrompt: String) = OmniAiRouter.generateImageBitmap(
+            prompt = activePrompt,
+            referenceBitmap = null,
+            sharedContextBlock = sharedContextBlock,
+            firebaseImageDelegate = { combinedPrompt, _ ->
+                withTimeout(60_000L) {
+                    val response = imageSynthesisModel.generateContent(combinedPrompt)
+                    response.candidates.firstOrNull()
+                        ?.content?.parts?.filterIsInstance<ImagePart>()
+                        ?.firstOrNull()?.image
+                } ?: throw IllegalStateException("No image was returned by gemini-nano-banana-2.1.")
+            }
+        )
+
         val omniImage = try {
-            OmniAiRouter.generateImageBitmap(
-                prompt = promptOutput.fullSpec,
-                referenceBitmap = null,
-                sharedContextBlock = sharedContextBlock,
-                firebaseImageDelegate = { combinedPrompt, _ ->
-                    withTimeout(60_000L) {
-                        val response = imageSynthesisModel.generateContent(combinedPrompt)
-                        response.candidates.firstOrNull()
-                            ?.content?.parts?.filterIsInstance<ImagePart>()
-                            ?.firstOrNull()?.image
-                    } ?: throw IllegalStateException("No image was returned by gemini-nano-banana-2.1.")
-                }
-            )
+            generateScratchBitmap(promptOutput.fullSpec)
         } catch (ce: CancellationException) {
             if (ce is TimeoutCancellationException) {
                 Log.w(TAG, "From-scratch AI generation timed out", ce)
@@ -567,11 +659,38 @@ object GeminiAssetForge {
             "${omniImage.providerUsed.name}:${omniImage.modelIdUsed}"
         }
 
-        val processedBitmap = if (autoStripChromaKey) {
+        val initialProcessedBitmap = if (autoStripChromaKey) {
             UniversalAssetImporter.stripChromaKeyBackground(rawGeneratedBitmap, tolerance = 42)
         } else {
             rawGeneratedBitmap
         }
+
+        // Automatic Closed-Loop Style Audit + optional 1-Pass Auto-Repair
+        val gateResult = CanonicalAssetAndCodeAuditor.runClosedLoopStyleGate(
+            initialBitmap = initialProcessedBitmap,
+            assetName = cleanTitle,
+            promptUsed = promptOutput.fullSpec,
+            hardwareTier = tier,
+            expectedChromaKeyHex = promptOutput.chromaKey.hexCode,
+            referenceBitmap = null,
+            allowSingleAutoRepair = autoRetryOnStyleFail,
+            repairGenerator = { correctionDirective ->
+                val repairedPrompt = buildString {
+                    appendLine(promptOutput.fullSpec)
+                    appendLine()
+                    appendLine("[AUTOMATIC 1-PASS STYLE REPAIR DIRECTIVE]")
+                    appendLine(correctionDirective)
+                }
+                val retryOmni = generateScratchBitmap(repairedPrompt)
+                if (autoStripChromaKey) {
+                    UniversalAssetImporter.stripChromaKeyBackground(retryOmni.bitmap, tolerance = 42)
+                } else {
+                    retryOmni.bitmap
+                }
+            }
+        )
+
+        val processedBitmap = gateResult.finalBitmap
 
         val (cols, rows) = when (preset) {
             PromptAssetPreset.SINGLE_SPRITE_1X1 -> 1 to 1
@@ -619,10 +738,13 @@ object GeminiAssetForge {
             title = cleanTitle,
             spriteSheet = finalSheet,
             extrudedMeshOrNull = extrudedMesh,
-            rawGeneratedBitmap = rawGeneratedBitmap,
+            rawGeneratedBitmap = processedBitmap,
             chromaKeyHex = promptOutput.chromaKey.hexCode,
             modelUsed = resolvedModelLabel,
-            promptUsed = promptOutput.fullSpec
+            promptUsed = promptOutput.fullSpec,
+            autoAuditReport = gateResult.auditReport,
+            autoRepairAttempted = gateResult.autoRepairAttempted,
+            autoRepairImprovedScore = gateResult.autoRepairImprovedScore
         )
     }
 
