@@ -16,11 +16,15 @@ import com.example.ai.AiProviderProfile
 import com.example.ai.AiProviderType
 import com.example.ai.AiSpriteSheetReviewResult
 import com.example.ai.AiTaskRole
+import com.example.ai.AiTrainingDatasetExporter
 import com.example.ai.ArtTheme
 import com.example.ai.AssetAuditReport
 import com.example.ai.AssetTarget
 import com.example.ai.CanonicalAssetAndCodeAuditor
 import com.example.ai.ContractComplianceReport
+import com.example.ai.ForgeChatMessage
+import com.example.ai.ForgeChatPromptBuilder
+import com.example.ai.ForgeChatRole
 import com.example.ai.GeminiAssetForge
 import com.example.ai.GeminiAssetVariant
 import com.example.ai.GeminiForgeReport
@@ -28,6 +32,7 @@ import com.example.ai.GeminiForgeUiState
 import com.example.ai.GeminiInputImageSource
 import com.example.ai.GeminiOperationMode
 import com.example.ai.KnowledgeSourceEntry
+import com.example.ai.KnowledgeSourceKind
 import com.example.ai.MultiSourceContextRegistry
 import com.example.ai.OmniAiRouter
 import com.example.ai.OmniAiRoutingConfig
@@ -37,6 +42,8 @@ import com.example.ai.PromptAssetPreset
 import com.example.ai.PromptHardwareTier
 import com.example.ai.PromptStudioEngine
 import com.example.ai.PromptStudioOutput
+import com.example.ai.UserAiTrainingProfile
+import com.example.ai.UserAiTrainingProfileStore
 import com.example.data.local.AssetGalleryEntity
 import com.example.data.local.AssetGalleryItemEntity
 import com.example.data.local.AssetGalleryRepository
@@ -115,15 +122,21 @@ import com.example.model.vault.SkinManifest
 import com.example.model.vault.VaultAssetKind
 import com.example.model.vault.VaultCatalogEntry
 import com.example.model.vault.VaultSettingsAndCatalogStore
+import com.google.firebase.Firebase
+import com.google.firebase.ai.ai
+import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.UUID
 import kotlin.math.roundToInt
 
 data class AppUiState(
@@ -249,7 +262,20 @@ data class AppUiState(
     val lastByosSyncReport: ByosSyncReport? = null,
     // AI Multi-Asset Builder (2D Sprite, 3D Model Blueprint, Texture, Audio Cry, 16-Step Chiptune)
     val selectedAiBuildTarget: AiBuildTargetKind = AiBuildTargetKind.SPRITE_2D,
-    val lastAiBuildSummary: String? = null
+    val lastAiBuildSummary: String? = null,
+    // Target Asset FPS, Dual-Mode Forge Chat Director, and Unified User Training Profile
+    val targetAssetFps: Int = 15,
+    val forgeCreateUxMode: Int = 0, // 0 = Studio Form, 1 = AI Chat
+    val forgeChatMessages: List<ForgeChatMessage> = listOf(
+        ForgeChatMessage(
+            id = "welcome",
+            role = ForgeChatRole.ASSISTANT,
+            text = "AI Asset Director online. Brainstorm sprites, 3D models, textures, cries, or chiptunes with me—then tap any Build button on my reply to materialize it directly into your studio. Your connected training profile syncs across both Form and Chat.",
+            providerUsed = "Director"
+        )
+    ),
+    val isForgeChatSending: Boolean = false,
+    val userAiTrainingProfile: UserAiTrainingProfile = UserAiTrainingProfile()
 )
 
 class MainViewModel(
@@ -468,6 +494,8 @@ class MainViewModel(
         val appCtx = context.applicationContext
         this.appContext = appCtx
         OmniAiRouter.attachContext(appCtx)
+        val loadedTrainingProfile = UserAiTrainingProfileStore.load(appCtx)
+        _uiState.update { it.copy(userAiTrainingProfile = loadedTrainingProfile) }
         refreshOmniAiHubState()
         loadVaultPersistence(appCtx)
         val db = PixelForgeDatabase.getDatabase(appCtx)
@@ -3166,15 +3194,22 @@ class MainViewModel(
     }
 
     fun buildCurrentPromptStudioOutput(state: AppUiState = _uiState.value): PromptStudioOutput {
+        val baseSubject = state.promptText.ifBlank { state.currentSpriteSheet.name }
+        val effectiveSubject = if (state.userAiTrainingProfile.applyToFormBuilder) {
+            state.userAiTrainingProfile.applyTriggerToPrompt(baseSubject)
+        } else {
+            baseSubject
+        }
         return PromptStudioEngine.buildPrompts(
-            subjectDescription = state.promptText.ifBlank { state.currentSpriteSheet.name },
+            subjectDescription = effectiveSubject,
             tier = state.promptHardwareTier,
             preset = state.promptAssetPreset,
             includeHumanoidHeroicProportions = state.includeHumanoidHeroicProportions,
             paletteHexList = state.extractedPalette.map { it.hex },
             gameTag = state.activeGameTagForImports,
             groupTag = state.activeGroupTagForImports,
-            characterTag = state.activeCharacterTagForImports
+            characterTag = state.activeCharacterTagForImports,
+            targetFps = state.targetAssetFps
         )
     }
 
@@ -4166,11 +4201,7 @@ class MainViewModel(
     }
 
     fun setScratchFps(fps: Int) {
-        _uiState.update { state ->
-            state.copy(
-                scratchSpriteProject = state.scratchSpriteProject.copy(fps = fps.coerceIn(1, 30))
-            )
-        }
+        updateTargetAssetFps(fps)
     }
 
     fun commitScratchSpriteProjectToStudioAndVault() {
@@ -4261,8 +4292,8 @@ class MainViewModel(
 
     fun createBrandNewAssetFromScratchWithAi(alsoExtrude3D: Boolean = false) {
         val snapshot = _uiState.value
-        val subject = snapshot.promptText.trim()
-        if (subject.isBlank()) {
+        val rawSubject = snapshot.promptText.trim()
+        if (rawSubject.isBlank()) {
             _uiState.update {
                 it.copy(
                     lastScratchAiError = "Enter a subject description before generating a brand-new asset from scratch.",
@@ -4272,25 +4303,32 @@ class MainViewModel(
             return
         }
 
+        val subject = if (snapshot.userAiTrainingProfile.applyToFormBuilder) {
+            snapshot.userAiTrainingProfile.applyTriggerToPrompt(rawSubject)
+        } else {
+            rawSubject
+        }
+        val targetFps = snapshot.targetAssetFps.coerceIn(1, 120)
         val assetName = snapshot.scratchCreateAssetName.trim()
         val activeGame = snapshot.activeGameTagForImports.ifBlank { "General Studio" }
         val activeGroup = snapshot.activeGroupTagForImports.ifBlank { "Core Roster" }
         val activeChar = assetName.ifBlank {
-            subject.split(Regex("\\s+")).take(3).joinToString(" ").ifBlank { "Original Creation" }
+            rawSubject.split(Regex("\\s+")).take(3).joinToString(" ").ifBlank { "Original Creation" }
         }
         val paletteHexes = snapshot.selectedColorWheelHexes.ifEmpty {
             snapshot.extractedPalette.map { it.hex }
         }
-        val sharedContextBlock = OmniAiRouter.getContextRegistry().assembleContextBlock(
+        val sharedContextBlock = buildCombinedSharedTrainingContext(
+            forChat = false,
             queryHint = subject,
-            activeProjectSummary = buildActiveProjectContextSummary(snapshot)
+            state = snapshot
         )
 
         _uiState.update {
             it.copy(
                 isCreatingFromScratchWithAi = true,
                 lastScratchAiError = null,
-                statusMessage = "Generating brand-new asset from scratch (${snapshot.promptAssetPreset.displayName} • ${snapshot.promptHardwareTier.displayName})..."
+                statusMessage = "Generating brand-new asset from scratch (${snapshot.promptAssetPreset.displayName} • ${targetFps} FPS • ${snapshot.promptHardwareTier.displayName})..."
             )
         }
 
@@ -4309,7 +4347,8 @@ class MainViewModel(
                     sharedContextBlock = sharedContextBlock,
                     autoStripChromaKey = snapshot.stripSolidBgOnImport,
                     alsoExtrude3D = alsoExtrude3D,
-                    autoRetryOnStyleFail = snapshot.autoRetryAiStyleGate
+                    autoRetryOnStyleFail = snapshot.autoRetryAiStyleGate,
+                    targetFps = targetFps
                 )
 
                 val audit = result.autoAuditReport
@@ -4335,7 +4374,7 @@ class MainViewModel(
                     mesh = result.extrudedMeshOrNull,
                     spriteSheet = result.spriteSheet,
                     hardwareBadge = snapshot.selectedHardware.shortName,
-                    metricsSummary = "${result.spriteSheet.frameWidth}×${result.spriteSheet.frameHeight}px • ${result.spriteSheet.frames.size}f • ${result.modelUsed}$auditMetricsTag"
+                    metricsSummary = "${result.spriteSheet.frameWidth}×${result.spriteSheet.frameHeight}px • ${result.spriteSheet.frames.size}f @${targetFps}fps • ${result.modelUsed}$auditMetricsTag"
                 )
 
                 val updatedRig = RigMetadata.defaultForSprite(
@@ -4343,7 +4382,7 @@ class MainViewModel(
                     width = result.spriteSheet.frameWidth,
                     height = result.spriteSheet.frameHeight,
                     frameCount = result.spriteSheet.frames.size
-                )
+                ).copy(cadenceFps = AiTrainingDatasetExporter.nearestRigCadence(targetFps))
 
                 _uiState.update { state ->
                     state.copy(
@@ -4356,8 +4395,8 @@ class MainViewModel(
                         currentMesh = result.extrudedMeshOrNull ?: state.currentMesh,
                         activeRigMetadata = updatedRig,
                         savedLibraryAssets = listOf(savedEntry) + state.savedLibraryAssets,
-                        lastAiBuildSummary = "Built 2D sprite '${result.title}' (${result.spriteSheet.frames.size}f, key ${result.chromaKeyHex}) via ${result.modelUsed}$auditMetricsTag — open Sprite Studio to inspect or edit.",
-                        statusMessage = "Created '${result.title}' from scratch via ${result.modelUsed} (${result.spriteSheet.frames.size}f, key ${result.chromaKeyHex}$auditMetricsTag)!"
+                        lastAiBuildSummary = "Built 2D sprite '${result.title}' (${result.spriteSheet.frames.size}f @ ${targetFps} FPS, key ${result.chromaKeyHex}) via ${result.modelUsed}$auditMetricsTag — open Sprite Studio to inspect or edit.",
+                        statusMessage = "Created '${result.title}' from scratch via ${result.modelUsed} (${result.spriteSheet.frames.size}f @ ${targetFps} FPS, key ${result.chromaKeyHex}$auditMetricsTag)!"
                     )
                 }
 
@@ -4959,8 +4998,8 @@ class MainViewModel(
             return
         }
 
-        val subject = snapshot.promptText.trim()
-        if (subject.isBlank()) {
+        val rawSubject = snapshot.promptText.trim()
+        if (rawSubject.isBlank()) {
             _uiState.update {
                 it.copy(
                     lastScratchAiError = "Enter a description before building a brand-new ${target.label} with AI.",
@@ -4970,17 +5009,23 @@ class MainViewModel(
             return
         }
 
+        val subject = if (snapshot.userAiTrainingProfile.applyToFormBuilder) {
+            snapshot.userAiTrainingProfile.applyTriggerToPrompt(rawSubject)
+        } else {
+            rawSubject
+        }
         val assetName = snapshot.scratchCreateAssetName.trim()
         val activeGame = snapshot.activeGameTagForImports.ifBlank { "General Studio" }
         val activeGroup = snapshot.activeGroupTagForImports.ifBlank { "Core Roster" }
         val activeChar = assetName.ifBlank {
-            subject.split(Regex("\\s+")).take(3).joinToString(" ")
+            rawSubject.split(Regex("\\s+")).take(3).joinToString(" ")
                 .replaceFirstChar { it.uppercase() }
                 .ifBlank { "Original Creation" }
         }
-        val sharedContextBlock = OmniAiRouter.getContextRegistry().assembleContextBlock(
+        val sharedContextBlock = buildCombinedSharedTrainingContext(
+            forChat = false,
             queryHint = subject,
-            activeProjectSummary = buildActiveProjectContextSummary(snapshot)
+            state = snapshot
         )
 
         _uiState.update {
@@ -5197,6 +5242,412 @@ class MainViewModel(
                     )
                 }
             }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Target FPS, Dual-Mode Forge AI Chat Director & Unified User Training Hub
+    // -------------------------------------------------------------------------
+
+    private val directorChatFirebaseModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.8-flash",
+            generationConfig = generationConfig {
+                temperature = 0.7f
+            }
+        )
+    }
+
+    private fun buildCombinedSharedTrainingContext(
+        forChat: Boolean,
+        queryHint: String = _uiState.value.promptText,
+        state: AppUiState = _uiState.value
+    ): String {
+        val registryBlock = OmniAiRouter.getContextRegistry().assembleContextBlock(
+            queryHint = queryHint,
+            activeProjectSummary = buildActiveProjectContextSummary(state)
+        ).trim()
+        val profile = state.userAiTrainingProfile
+        val trainingEnabled = if (forChat) profile.applyToChatStudio else profile.applyToFormBuilder
+        val trainingBlock = if (trainingEnabled) profile.buildUnifiedTrainingContextBlock() else ""
+
+        return listOf(trainingBlock, registryBlock)
+            .filter { it.isNotBlank() }
+            .joinToString("\n\n")
+    }
+
+    fun updateTargetAssetFps(fps: Int) {
+        val clamped = fps.coerceIn(1, 120)
+        val nearestCadence = AiTrainingDatasetExporter.nearestRigCadence(clamped)
+        _uiState.update { state ->
+            state.copy(
+                targetAssetFps = clamped,
+                scratchSpriteProject = state.scratchSpriteProject.copy(fps = clamped.coerceIn(1, 60)),
+                activeRigMetadata = state.activeRigMetadata.copy(cadenceFps = nearestCadence)
+            )
+        }
+    }
+
+    fun setForgeCreateUxMode(mode: Int) {
+        _uiState.update { it.copy(forgeCreateUxMode = mode.coerceIn(0, 1)) }
+    }
+
+    fun sendForgeChatMessage(userText: String) {
+        val cleanText = userText.trim()
+        if (cleanText.isEmpty() || _uiState.value.isForgeChatSending) return
+
+        val snapshot = _uiState.value
+        val userMessage = ForgeChatMessage(
+            id = "chat_u_${UUID.randomUUID().toString().take(8)}",
+            role = ForgeChatRole.USER,
+            text = cleanText
+        )
+        val historyBeforeSend = snapshot.forgeChatMessages
+        _uiState.update { state ->
+            state.copy(
+                forgeChatMessages = state.forgeChatMessages + userMessage,
+                isForgeChatSending = true
+            )
+        }
+
+        val sharedRegistryBlock = OmniAiRouter.getContextRegistry().assembleContextBlock(
+            queryHint = cleanText,
+            activeProjectSummary = buildActiveProjectContextSummary(snapshot)
+        )
+        val conversationPrompt = ForgeChatPromptBuilder.buildConversationPrompt(
+            history = historyBeforeSend,
+            userMessage = cleanText,
+            targetFps = snapshot.targetAssetFps,
+            trainingProfile = snapshot.userAiTrainingProfile,
+            sharedContextBlock = sharedRegistryBlock
+        )
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val response = OmniAiRouter.generateTextOrJson(
+                    role = AiTaskRole.TEXT_AND_SPECS,
+                    prompt = conversationPrompt,
+                    systemInstruction = "You are PixelForge Game Asset Director. Give clear, concise creative and technical guidance. Always include a `BUILD_PROMPT:` line when proposing a buildable asset.",
+                    imageBitmap = null,
+                    expectJson = false,
+                    sharedContextBlock = "",
+                    firebaseDelegate = { effectivePrompt, _ ->
+                        withTimeout(60_000L) {
+                            val resp = directorChatFirebaseModel.generateContent(effectivePrompt)
+                            resp.text?.trim()
+                                ?: throw IllegalStateException("Empty reply from Firebase gemini-3.8-flash.")
+                        }
+                    }
+                )
+
+                val replyText = response.text.trim().ifBlank {
+                    "I have refined your concept. BUILD_PROMPT: $cleanText"
+                }
+                val (suggestedTarget, extractedPrompt) = ForgeChatPromptBuilder.extractSuggestedTargetAndPrompt(
+                    replyText = replyText,
+                    fallbackUserPrompt = cleanText
+                )
+                val providerLabel = if (response.providerUsed == AiProviderType.FIREBASE_STUDIO) {
+                    "Firebase (${response.modelIdUsed})"
+                } else {
+                    "${response.providerUsed.defaultDisplayName} (${response.modelIdUsed})"
+                }
+
+                val assistantMessage = ForgeChatMessage(
+                    id = "chat_a_${UUID.randomUUID().toString().take(8)}",
+                    role = ForgeChatRole.ASSISTANT,
+                    text = replyText,
+                    providerUsed = providerLabel,
+                    extractedBuildPrompt = extractedPrompt,
+                    suggestedBuildTarget = suggestedTarget
+                )
+                _uiState.update { state ->
+                    state.copy(
+                        forgeChatMessages = state.forgeChatMessages + assistantMessage,
+                        isForgeChatSending = false
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Forge AI chat director request failed", e)
+                val errText = e.localizedMessage?.take(220)
+                    ?: "No connected AI provider responded. Tap Select / Connect AIs to configure a provider."
+                val errorBubble = ForgeChatMessage(
+                    id = "chat_err_${UUID.randomUUID().toString().take(8)}",
+                    role = ForgeChatRole.ASSISTANT,
+                    text = "AI Director could not reach your active provider: $errText",
+                    providerUsed = "Error",
+                    extractedBuildPrompt = cleanText,
+                    suggestedBuildTarget = _uiState.value.selectedAiBuildTarget
+                )
+                _uiState.update { state ->
+                    state.copy(
+                        forgeChatMessages = state.forgeChatMessages + errorBubble,
+                        isForgeChatSending = false,
+                        statusMessage = "AI Chat error: $errText"
+                    )
+                }
+            }
+        }
+    }
+
+    fun buildAssetFromChatMessage(messageId: String, targetKind: AiBuildTargetKind) {
+        val snapshot = _uiState.value
+        val message = snapshot.forgeChatMessages.firstOrNull { it.id == messageId } ?: return
+        val basePrompt = (message.extractedBuildPrompt?.takeIf { it.isNotBlank() } ?: message.text)
+            .trim()
+            .take(400)
+        val effectivePrompt = if (snapshot.userAiTrainingProfile.applyToChatStudio) {
+            snapshot.userAiTrainingProfile.applyTriggerToPrompt(basePrompt)
+        } else {
+            basePrompt
+        }
+        val inferredName = snapshot.scratchCreateAssetName.trim().ifBlank {
+            basePrompt.split(Regex("\\s+")).take(3).joinToString(" ")
+                .replace(Regex("[^A-Za-z0-9 _-]"), "")
+                .trim()
+                .ifBlank { "Chat ${targetKind.label}" }
+        }
+        _uiState.update { state ->
+            state.copy(
+                promptText = effectivePrompt,
+                scratchCreateAssetName = inferredName,
+                selectedAiBuildTarget = targetKind
+            )
+        }
+        buildBrandNewAssetWithAi()
+    }
+
+    fun pinActiveAssetAsAiTrainingExample() {
+        val state = _uiState.value
+        val target = state.selectedAiBuildTarget
+        val (title, specSummary) = when (target) {
+            AiBuildTargetKind.MODEL_3D -> {
+                val p3d = state.scratch3DProject
+                val desc = if (p3d.parts.isNotEmpty()) {
+                    "3D Kitbash (${p3d.parts.size} parts): " + p3d.parts.take(8).joinToString(", ") { "${it.name}[${it.shape.name}]" }
+                } else {
+                    "Mesh '${state.currentMesh.name}' (${state.currentMesh.vertexCount}v/${state.currentMesh.faceCount}f)"
+                }
+                p3d.name.ifBlank { state.currentMesh.name } to desc
+            }
+            AiBuildTargetKind.TEXTURE_MATERIAL -> {
+                val tex = state.scratchTextureProject
+                tex.name to "${tex.sizePx}x${tex.sizePx}px texture (mirrorX=${tex.mirrorX}, mirrorY=${tex.mirrorY})"
+            }
+            AiBuildTargetKind.AUDIO_CRY, AiBuildTargetKind.AUDIO_CHIPTUNE -> {
+                val audio = state.audioVaultEntries.firstOrNull { it.id == state.selectedAudioEntryId }
+                    ?: state.audioVaultEntries.firstOrNull()
+                if (audio != null) {
+                    audio.title to audio.toExportSpecJson()
+                } else {
+                    "Studio Audio Preset" to "Soundchip DSP: ${state.selectedSoundchipProfile.displayName}"
+                }
+            }
+            AiBuildTargetKind.SPRITE_2D -> {
+                val sheet = state.currentSpriteSheet
+                sheet.name to "${sheet.frameWidth}x${sheet.frameHeight}px, ${sheet.columns}x${sheet.rows} grid (${sheet.frames.size} frames), ${state.targetAssetFps} FPS, tier=${state.promptHardwareTier.name}"
+            }
+        }
+
+        val exampleText = AiTrainingDatasetExporter.buildFewShotTrainingExampleText(
+            assetTitle = title,
+            targetKind = target,
+            promptUsed = state.promptText.ifBlank { title },
+            targetFps = state.targetAssetFps,
+            structuredRecipeOrMetadata = specSummary
+        )
+        OmniAiRouter.getContextRegistry().addPastedNoteSource(
+            title = "Training Example: $title",
+            content = exampleText,
+            kind = KnowledgeSourceKind.PASTED_NOTES,
+            originLabel = "Pinned Active Studio Asset (${target.label})"
+        )
+        refreshOmniAiHubState()
+        _uiState.update {
+            it.copy(statusMessage = "Pinned '$title' as a shared AI few-shot training example (synced across Form + Chat)!")
+        }
+    }
+
+    fun pinChatMessageAsSharedTraining(messageId: String) {
+        val state = _uiState.value
+        val msg = state.forgeChatMessages.firstOrNull { it.id == messageId } ?: return
+        val target = msg.suggestedBuildTarget ?: state.selectedAiBuildTarget
+        val promptSnippet = msg.extractedBuildPrompt ?: msg.text.take(160)
+        val exampleText = AiTrainingDatasetExporter.buildFewShotTrainingExampleText(
+            assetTitle = "Director Note (${target.label})",
+            targetKind = target,
+            promptUsed = promptSnippet,
+            targetFps = state.targetAssetFps,
+            structuredRecipeOrMetadata = msg.text.take(1200)
+        )
+        OmniAiRouter.getContextRegistry().addPastedNoteSource(
+            title = "Chat Training: ${promptSnippet.take(28)}",
+            content = exampleText,
+            kind = KnowledgeSourceKind.PASTED_NOTES,
+            originLabel = "Pinned from AI Chat Studio"
+        )
+        refreshOmniAiHubState()
+        _uiState.update {
+            it.copy(statusMessage = "Pinned AI Chat direction to shared training sources (synced across Form + Chat)!")
+        }
+    }
+
+    fun clearForgeChatHistory() {
+        _uiState.update { state ->
+            state.copy(
+                forgeChatMessages = listOf(
+                    ForgeChatMessage(
+                        id = "welcome_${System.currentTimeMillis()}",
+                        role = ForgeChatRole.ASSISTANT,
+                        text = "Chat cleared. AI Asset Director is ready—describe your next sprite, 3D model, texture, cry, or chiptune at ${state.targetAssetFps} FPS.",
+                        providerUsed = "Director"
+                    )
+                ),
+                isForgeChatSending = false,
+                statusMessage = "Cleared AI Chat Studio conversation."
+            )
+        }
+    }
+
+    fun updateUserAiTrainingProfile(
+        context: Context,
+        triggerToken: String,
+        customLoraOrModelTag: String,
+        trainingNotes: String,
+        applyToForm: Boolean,
+        applyToChat: Boolean
+    ) {
+        val current = _uiState.value.userAiTrainingProfile
+        val updated = current.copy(
+            styleTriggerToken = triggerToken.trim(),
+            customLoraOrModelTag = customLoraOrModelTag.trim(),
+            customTrainingNotes = trainingNotes.trim(),
+            applyToFormBuilder = applyToForm,
+            applyToChatStudio = applyToChat
+        )
+        UserAiTrainingProfileStore.save(context, updated)
+        _uiState.update { state ->
+            state.copy(
+                userAiTrainingProfile = updated,
+                statusMessage = "Saved Unified AI Training Profile (Form=${if (applyToForm) "ON" else "OFF"}, Chat=${if (applyToChat) "ON" else "OFF"})."
+            )
+        }
+    }
+
+    fun importUserTrainingFileToSharedContext(
+        context: Context,
+        uri: Uri,
+        displayName: String
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val maxBytes = 256 * 1024
+                val rawText = context.contentResolver.openInputStream(uri)?.use { input ->
+                    val buffer = ByteArray(8192)
+                    val out = ByteArrayOutputStream()
+                    var total = 0
+                    while (total < maxBytes) {
+                        val toRead = (maxBytes - total).coerceAtMost(buffer.size)
+                        val read = input.read(buffer, 0, toRead)
+                        if (read <= 0) break
+                        out.write(buffer, 0, read)
+                        total += read
+                    }
+                    String(out.toByteArray(), Charsets.UTF_8)
+                }.orEmpty()
+
+                val safeName = displayName.trim().ifBlank { "user_training_file.txt" }
+                val parsedBlock = AiTrainingDatasetExporter.parseImportedUserTrainingFile(safeName, rawText)
+                OmniAiRouter.getContextRegistry().addPastedNoteSource(
+                    title = "User Training: $safeName",
+                    content = parsedBlock,
+                    kind = KnowledgeSourceKind.LOCAL_FILE,
+                    originLabel = "Imported Training File ($safeName)"
+                )
+
+                val currentProfile = _uiState.value.userAiTrainingProfile
+                val updatedProfile = currentProfile.copy(
+                    attachedTrainingFileCount = currentProfile.attachedTrainingFileCount + 1
+                )
+                UserAiTrainingProfileStore.save(context, updatedProfile)
+
+                _uiState.update { state ->
+                    state.copy(
+                        userAiTrainingProfile = updatedProfile,
+                        knowledgeSources = OmniAiRouter.getContextRegistry().getSources(),
+                        statusMessage = "Imported '$safeName' into shared AI training context (synced across Form + Chat)!"
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Failed to import user training file '$displayName'", e)
+                _uiState.update { state ->
+                    state.copy(
+                        statusMessage = "Training file import failed: ${e.localizedMessage ?: "Unsupported or unreadable file."}"
+                    )
+                }
+            }
+        }
+    }
+
+    fun prepareLoraTrainingManifestExport(triggerToken: String = "") {
+        val state = _uiState.value
+        val activeGallery = state.assetGalleries.firstOrNull { it.gallery.id == state.selectedGalleryId }
+            ?: state.assetGalleries.firstOrNull()
+            ?: AssetGalleryWithItems(
+                gallery = AssetGalleryEntity(
+                    id = 0L,
+                    name = state.activeGameTagForImports.ifBlank { "Studio Pack" },
+                    description = "Active Studio Export"
+                ),
+                items = listOf(
+                    AssetGalleryItemEntity.fromStudioAssets(
+                        galleryId = 0L,
+                        title = state.currentSpriteSheet.name,
+                        characterTag = state.activeCharacterTagForImports,
+                        assetType = "SPRITE_2D",
+                        sourceOrigin = "STUDIO",
+                        hardwareTarget = state.selectedHardware.shortName,
+                        metricsSummary = "${state.currentSpriteSheet.frames.size}f @ ${state.targetAssetFps} FPS",
+                        spriteSheet = state.currentSpriteSheet,
+                        gameTag = state.activeGameTagForImports,
+                        groupTag = state.activeGroupTagForImports
+                    )
+                )
+            )
+        val effectiveTrigger = triggerToken.trim()
+            .ifBlank { state.userAiTrainingProfile.styleTriggerToken.trim() }
+            .ifBlank { "mpv_truefusion" }
+
+        val manifestJson = AiTrainingDatasetExporter.buildLoraCaptionManifestJson(
+            gallery = activeGallery,
+            triggerToken = effectiveTrigger,
+            targetFps = state.targetAssetFps,
+            tier = state.promptHardwareTier
+        )
+        _uiState.update {
+            it.copy(
+                exportDialogTitle = "Export LoRA Caption Manifest (.json — $effectiveTrigger)",
+                exportDialogText = manifestJson,
+                statusMessage = "Prepared LoRA caption manifest (${activeGallery.items.size} entries @ ${state.targetAssetFps} FPS)."
+            )
+        }
+    }
+
+    fun prepareJsonlFineTuneExport() {
+        val state = _uiState.value
+        val jsonl = AiTrainingDatasetExporter.buildJsonlFineTuneDataset(
+            project3D = state.scratch3DProject,
+            textureProject = state.scratchTextureProject,
+            audioEntries = state.audioVaultEntries,
+            targetFps = state.targetAssetFps
+        )
+        val lineCount = jsonl.lineSequence().count { it.isNotBlank() }
+        _uiState.update {
+            it.copy(
+                exportDialogTitle = "Export Fine-Tune Dataset (.jsonl — $lineCount samples)",
+                exportDialogText = jsonl,
+                statusMessage = "Prepared fine-tune JSONL dataset ($lineCount training lines @ ${state.targetAssetFps} FPS)."
+            )
         }
     }
 

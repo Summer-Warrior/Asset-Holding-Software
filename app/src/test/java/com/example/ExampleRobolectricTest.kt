@@ -2723,7 +2723,205 @@ class ExampleRobolectricTest {
     assertTrue(openRouter.supportsImage2D)
     assertEquals(false, openRouter.isLocalSelfHosted)
   }
+
+  @Test
+  fun `test target fps propagation and unified training dataset export`() {
+    val vm = MainViewModel()
+
+    // 1. Target FPS updates & clamping (999 -> 120, 0 -> 1, 60 -> 60)
+    vm.updateTargetAssetFps(999)
+    assertEquals(120, vm.uiState.value.targetAssetFps)
+    assertEquals(com.example.model.masterpack.FrameCadenceFps.FPS_60, vm.uiState.value.activeRigMetadata.cadenceFps)
+
+    vm.updateTargetAssetFps(0)
+    assertEquals(1, vm.uiState.value.targetAssetFps)
+    assertEquals(com.example.model.masterpack.FrameCadenceFps.FPS_12, vm.uiState.value.activeRigMetadata.cadenceFps)
+
+    vm.updateTargetAssetFps(60)
+    assertEquals(60, vm.uiState.value.targetAssetFps)
+    assertEquals(60, vm.uiState.value.scratchSpriteProject.fps)
+    assertEquals(com.example.model.masterpack.FrameCadenceFps.FPS_60, vm.uiState.value.activeRigMetadata.cadenceFps)
+
+    // 2. PromptStudioEngine embeds 24 FPS cadence for GRID_SHEET_2X4 with compact500 <= 500 & zero "checkerboard"
+    val sheetPrompts = com.example.ai.PromptStudioEngine.buildPrompts(
+      subjectDescription = "armored emerald dragon guardian leaping through arcade flames",
+      tier = com.example.ai.PromptHardwareTier.ARCADE_32BIT_60FPS,
+      preset = com.example.ai.PromptAssetPreset.GRID_SHEET_2X4,
+      targetFps = 24
+    )
+    assertTrue("positiveSpecOnly must include 24 FPS", sheetPrompts.positiveSpecOnly.contains("24 FPS"))
+    assertTrue("natural4Sentence must include 24 FPS", sheetPrompts.natural4Sentence.contains("24 FPS"))
+    assertTrue("compact500 must be <= 500 chars", sheetPrompts.compact500.length <= 500)
+    assertEquals(false, sheetPrompts.positiveSpecOnly.contains("checkerboard", ignoreCase = true))
+    assertEquals(false, sheetPrompts.natural4Sentence.contains("checkerboard", ignoreCase = true))
+    assertEquals(false, sheetPrompts.compact500.contains("checkerboard", ignoreCase = true))
+
+    // 3. LoRA Caption Manifest JSON export
+    val sampleGallery = com.example.data.local.AssetGalleryWithItems(
+      gallery = com.example.data.local.AssetGalleryEntity(
+        id = 7L,
+        name = "Arcade Heroes",
+        description = "Test Exhibition"
+      ),
+      items = listOf(
+        com.example.data.local.AssetGalleryItemEntity(
+          id = 11L,
+          galleryId = 7L,
+          title = "Kaelen Sprint",
+          characterTag = "Kaelen",
+          assetType = "SPRITE_2D",
+          sourceOrigin = "STUDIO",
+          hardwareTarget = "PS1",
+          metricsSummary = "8 frames",
+          spriteColumns = 4,
+          spriteRows = 2,
+          gameTag = "MPV In-Universe MMO",
+          groupTag = "Protagonists"
+        )
+      )
+    )
+    val loraJson = com.example.ai.AiTrainingDatasetExporter.buildLoraCaptionManifestJson(
+      gallery = sampleGallery,
+      triggerToken = "mpv_cel_v2",
+      targetFps = 24,
+      tier = com.example.ai.PromptHardwareTier.TRUE_FUSION_HD
+    )
+    val loraObj = org.json.JSONObject(loraJson)
+    assertEquals("pixelforge.lora_dataset.v1", loraObj.getString("schema"))
+    assertEquals("mpv_cel_v2", loraObj.getString("triggerToken"))
+    assertEquals(24, loraObj.getInt("targetFps"))
+    val entries = loraObj.getJSONArray("entries")
+    assertEquals(1, entries.length())
+    val firstEntry = entries.getJSONObject(0)
+    assertTrue(firstEntry.getString("captionText").contains("mpv_cel_v2"))
+    assertTrue(firstEntry.getString("captionText").contains("24 FPS"))
+    assertEquals("MPV In-Universe MMO", firstEntry.getString("gameTag"))
+
+    // 4. Fine-Tune JSONL export (valid JSON with messages array on every line)
+    val sample3D = com.example.model.model3d.Scratch3DBuilderEngine.addPart(
+      com.example.model.model3d.Scratch3DBuilderEngine.createEmptyProject("Test Mech"),
+      com.example.model.model3d.PrimitiveShapeType.BOX,
+      0xFF00E5FF
+    )
+    val sampleTex = com.example.model.texture.ScratchTextureEngine.createBlankTexture("Test Plate", 16)
+    val jsonl = com.example.ai.AiTrainingDatasetExporter.buildJsonlFineTuneDataset(
+      project3D = sample3D,
+      textureProject = sampleTex,
+      audioEntries = vm.uiState.value.audioVaultEntries,
+      targetFps = 30
+    )
+    val jsonlLines = jsonl.lineSequence().filter { it.isNotBlank() }.toList()
+    assertTrue("JSONL must contain multiple training lines", jsonlLines.size >= 3)
+    jsonlLines.forEach { line ->
+      val obj = org.json.JSONObject(line)
+      val msgs = obj.getJSONArray("messages")
+      assertEquals(3, msgs.length())
+      assertEquals("system", msgs.getJSONObject(0).getString("role"))
+      assertEquals("user", msgs.getJSONObject(1).getString("role"))
+      assertEquals("assistant", msgs.getJSONObject(2).getString("role"))
+    }
+
+    // 5. Pinning active asset adds an enabled source to knowledgeSources
+    val beforeCount = vm.uiState.value.knowledgeSources.count { it.enabled }
+    vm.pinActiveAssetAsAiTrainingExample()
+    val afterCount = vm.uiState.value.knowledgeSources.count { it.enabled }
+    assertTrue("Pinning active asset must add an enabled knowledge source", afterCount > beforeCount)
+  }
+
+  @Test
+  fun `test forge chat prompt builder and unified user training profile sync`() {
+    // 1. UserAiTrainingProfile JSON round-trip
+    val profile = com.example.ai.UserAiTrainingProfile(
+      styleTriggerToken = "mpv_truefusion",
+      customLoraOrModelTag = "<lora:mpv_cel_32bit:0.85>",
+      customTrainingNotes = "Always keep crisp 2-step cel shadows and glowing cyan Mana Circuits.",
+      attachedTrainingFileCount = 2,
+      applyToFormBuilder = true,
+      applyToChatStudio = true
+    )
+    val roundTripped = com.example.ai.UserAiTrainingProfile.fromJsonString(profile.toJsonString())
+    assertEquals(profile, roundTripped)
+
+    // 2. applyTriggerToPrompt prepends without duplicating tokens already present
+    val prepended = profile.applyTriggerToPrompt("cyber knight with plasma shield")
+    assertTrue(prepended.startsWith("mpv_truefusion, <lora:mpv_cel_32bit:0.85>,"))
+    val noDup = profile.applyTriggerToPrompt("mpv_truefusion cyber knight <lora:mpv_cel_32bit:0.85>")
+    assertEquals("mpv_truefusion cyber knight <lora:mpv_cel_32bit:0.85>", noDup)
+
+    // 3. parseImportedUserTrainingFile parses multi-line .jsonl while skipping malformed lines safely
+    val mixedJsonl = """
+      {"messages":[{"role":"system","content":"You are a sprite artist."},{"role":"user","content":"Make a dragon"},{"role":"assistant","content":"BUILD_PROMPT: emerald dragon sprite"}]}
+      THIS IS NOT VALID JSON AT ALL
+      {"messages":[{"role":"user","content":"Make a mech"},{"role":"assistant","content":"{\"parts\":[{\"shape\":\"BOX\"}]}"}]}
+    """.trimIndent()
+    val parsedTraining = com.example.ai.AiTrainingDatasetExporter.parseImportedUserTrainingFile(
+      fileName = "custom_finetune.jsonl",
+      rawText = mixedJsonl
+    )
+    assertTrue(parsedTraining.contains("Example #1"))
+    assertTrue(parsedTraining.contains("Example #2"))
+    assertTrue(parsedTraining.contains("1 invalid lines skipped"))
+
+    // 4. ForgeChatPromptBuilder preserves multi-turn history, TARGET_FPS=30, and training context
+    val history = listOf(
+      com.example.ai.ForgeChatMessage(
+        id = "m1",
+        role = com.example.ai.ForgeChatRole.USER,
+        text = "Let's design a stealth mech boss"
+      ),
+      com.example.ai.ForgeChatMessage(
+        id = "m2",
+        role = com.example.ai.ForgeChatRole.ASSISTANT,
+        text = "Give it swept obsidian wings and glowing cyan thrusters."
+      )
+    )
+    val convPrompt = com.example.ai.ForgeChatPromptBuilder.buildConversationPrompt(
+      history = history,
+      userMessage = "Now add twin dorsal plasma cannons",
+      targetFps = 30,
+      trainingProfile = profile,
+      sharedContextBlock = "### [World Bible]\nAegis Grid faction colors: obsidian and cyan."
+    )
+    assertTrue(convPrompt.contains("TARGET_FPS=30"))
+    assertTrue(convPrompt.contains("mpv_truefusion"))
+    assertTrue(convPrompt.contains("<lora:mpv_cel_32bit:0.85>"))
+    assertTrue(convPrompt.contains("Let's design a stealth mech boss"))
+    assertTrue(convPrompt.contains("Now add twin dorsal plasma cannons"))
+
+    // 5. extractSuggestedTargetAndPrompt detects 3D, Texture, Cry, Chiptune, and 2D cleanly
+    val (t3d, p3d) = com.example.ai.ForgeChatPromptBuilder.extractSuggestedTargetAndPrompt(
+      replyText = "Great silhouette!\nBUILD_PROMPT: Low-poly 3D model hover tank with twin turret cannons",
+      fallbackUserPrompt = "tank"
+    )
+    assertEquals(com.example.ai.AiBuildTargetKind.MODEL_3D, t3d)
+    assertTrue(p3d.contains("hover tank"))
+
+    val (tTex, _) = com.example.ai.ForgeChatPromptBuilder.extractSuggestedTargetAndPrompt(
+      replyText = "BUILD_PROMPT: Seamless tileable obsidian armor plate texture with cyan circuit lines",
+      fallbackUserPrompt = "plate"
+    )
+    assertEquals(com.example.ai.AiBuildTargetKind.TEXTURE_MATERIAL, tTex)
+
+    val (tCry, _) = com.example.ai.ForgeChatPromptBuilder.extractSuggestedTargetAndPrompt(
+      replyText = "BUILD_PROMPT: Resonant crystal phoenix creature cry roar SFX with harmonic chirp",
+      fallbackUserPrompt = "cry"
+    )
+    assertEquals(com.example.ai.AiBuildTargetKind.AUDIO_CRY, tCry)
+
+    val (tChip, _) = com.example.ai.ForgeChatPromptBuilder.extractSuggestedTargetAndPrompt(
+      replyText = "BUILD_PROMPT: Driving 145 BPM 16-step chiptune boss theme melody loop",
+      fallbackUserPrompt = "music"
+    )
+    assertEquals(com.example.ai.AiBuildTargetKind.AUDIO_CHIPTUNE, tChip)
+
+    val (t2d, _) = com.example.ai.ForgeChatPromptBuilder.extractSuggestedTargetAndPrompt(
+      replyText = "BUILD_PROMPT: Emerald dragon hatchling 2x4 arcade hero sprite sheet with golden horns",
+      fallbackUserPrompt = "dragon"
+    )
+    assertEquals(com.example.ai.AiBuildTargetKind.SPRITE_2D, t2d)
+  }
 }
+
 
 
 

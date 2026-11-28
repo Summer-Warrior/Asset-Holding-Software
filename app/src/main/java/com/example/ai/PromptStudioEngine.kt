@@ -192,8 +192,18 @@ object PromptStudioEngine {
         paletteHexList: List<String> = emptyList(),
         gameTag: String = "",
         groupTag: String = "",
-        characterTag: String = ""
+        characterTag: String = "",
+        targetFps: Int = 15
     ): PromptStudioOutput {
+        val safeFps = targetFps.coerceIn(1, 120)
+        val isAnimSheetPreset = preset == PromptAssetPreset.ROW_SHEET_1X4 ||
+            preset == PromptAssetPreset.GRID_SHEET_2X4
+        val fpsCadencePhrase = if (isAnimSheetPreset) {
+            "$safeFps FPS animation cadence"
+        } else {
+            ""
+        }
+
         val sanitizedSubject = sanitizePositiveText(
             subjectDescription.trim().ifBlank { "armored cyber-knight game hero with glowing visor and energy blade" }
         )
@@ -228,7 +238,8 @@ object PromptStudioEngine {
         } else {
             tier.positiveDirective
         }
-        val cleanSentence3 = "${preset.layoutDirective.trimEnd('.')}; ${paletteClause.trimEnd('.').replaceFirstChar { it.lowercase() }}."
+        val fpsNaturalSuffix = if (fpsCadencePhrase.isNotEmpty()) " tuned for $fpsCadencePhrase" else ""
+        val cleanSentence3 = "${preset.layoutDirective.trimEnd('.')}$fpsNaturalSuffix; ${paletteClause.trimEnd('.').replaceFirstChar { it.lowercase() }}."
         val sentence4 = chroma.positiveBackdropDirective
         val natural4Sentence = sanitizePositiveText(
             listOf(sentence1, sentence2, cleanSentence3, sentence4).joinToString(" ")
@@ -240,8 +251,9 @@ object PromptStudioEngine {
         } else {
             ""
         }
+        val compactFpsSuffix = if (isAnimSheetPreset) " @${safeFps}fps" else ""
         val fixedTemplateOverhead =
-            "${tier.compactDirective}; ${preset.compactLayout}; $compactProportion${chroma.compactBackdropDirective}$paletteSuffix. No 3D, blur, airbrush, text, grids."
+            "${tier.compactDirective}; ${preset.compactLayout}$compactFpsSuffix; $compactProportion${chroma.compactBackdropDirective}$paletteSuffix. No 3D, blur, airbrush, text, grids."
         val maxSubjectBudget = (MAX_COMPACT_LENGTH - fixedTemplateOverhead.length - 12).coerceAtLeast(36)
         val compactSubject = if (sanitizedSubject.length > maxSubjectBudget) {
             sanitizedSubject.take(maxSubjectBudget - 1).trimEnd(' ', ',', ';', '.') + "…"
@@ -249,7 +261,7 @@ object PromptStudioEngine {
             sanitizedSubject
         }
         val rawCompact = sanitizePositiveText(
-            "$compactSubject — ${tier.compactDirective}; ${preset.compactLayout}; ${compactProportion}${chroma.compactBackdropDirective}$paletteSuffix. No 3D, blur, airbrush, text, grids."
+            "$compactSubject — ${tier.compactDirective}; ${preset.compactLayout}$compactFpsSuffix; ${compactProportion}${chroma.compactBackdropDirective}$paletteSuffix. No 3D, blur, airbrush, text, grids."
                 .replace("; ,", ";")
                 .replace("  ", " ")
         )
@@ -274,6 +286,9 @@ object PromptStudioEngine {
                 appendLine("SUBJECT: $sanitizedSubject")
                 appendLine("ACTIVE HARDWARE TIER (${tier.displayName}): ${tier.positiveDirective}")
                 appendLine("ASSET PRESET (${preset.displayName}): ${preset.layoutDirective}")
+                if (fpsCadencePhrase.isNotEmpty()) {
+                    appendLine("ANIMATION TIMING: $fpsCadencePhrase with smooth keyframe spacing across every frame.")
+                }
                 if (proportionClause.isNotBlank()) {
                     appendLine("PROPORTIONS: $proportionClause")
                 }

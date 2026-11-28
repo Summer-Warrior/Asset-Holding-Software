@@ -27,6 +27,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
@@ -120,7 +122,7 @@ fun SpriteCanvasEditorPanel(
     LaunchedEffect(isPlayingPreview, project.frames.size, project.fps) {
         if (!isPlayingPreview || project.frames.size <= 1) return@LaunchedEffect
         while (true) {
-            val delayMs = (1000L / project.fps.coerceIn(1, 30)).coerceAtLeast(33L)
+            val delayMs = (1000L / project.fps.coerceIn(1, 60)).coerceAtLeast(16L)
             delay(delayMs)
             previewFrameIdx = (previewFrameIdx + 1) % project.frames.size
         }
@@ -619,34 +621,77 @@ fun SpriteCanvasEditorPanel(
 
             HorizontalDivider(color = CardBorder)
 
-            // 5. Animation Frame Strip + Controls
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "ANIMATION FRAMES (${project.frames.size}/16)",
-                    fontFamily = TechMono,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = CyanNeon
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    listOf(4, 8, 12, 15).forEach { targetFps ->
+            // 5. Animation Frame Strip + Target FPS Controls
+            var canvasFpsInput by remember(uiState.targetAssetFps) {
+                mutableStateOf(uiState.targetAssetFps.toString())
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "ANIMATION FRAMES (${project.frames.size}/16)",
+                        fontFamily = TechMono,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = CyanNeon
+                    )
+                    OutlinedTextField(
+                        value = canvasFpsInput,
+                        onValueChange = { raw ->
+                            val digits = raw.filter { it.isDigit() }.take(3)
+                            canvasFpsInput = digits
+                            digits.toIntOrNull()?.let { parsed ->
+                                viewModel.updateTargetAssetFps(parsed)
+                            }
+                        },
+                        label = { Text("FPS", fontFamily = TechMono, fontSize = 8.sp) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AmberGold,
+                            unfocusedBorderColor = CardBorder,
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedLabelColor = AmberGold,
+                            unfocusedLabelColor = CanvasMutedText
+                        ),
+                        modifier = Modifier
+                            .width(78.dp)
+                            .testTag("scratch_canvas_target_fps_input")
+                    )
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Target FPS:", fontFamily = TechMono, fontSize = 9.sp, color = CanvasMutedText)
+                    listOf(8, 12, 15, 24, 30, 60).forEach { targetFps ->
+                        val active = uiState.targetAssetFps == targetFps
                         Surface(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
-                                .clickable { viewModel.setScratchFps(targetFps) },
-                            color = if (project.fps == targetFps) CyanNeon.copy(alpha = 0.22f) else CanvasCardBg,
-                            border = BorderStroke(1.dp, if (project.fps == targetFps) CyanNeon else CardBorder)
+                                .clickable {
+                                    canvasFpsInput = targetFps.toString()
+                                    viewModel.updateTargetAssetFps(targetFps)
+                                }
+                                .testTag("scratch_canvas_fps_chip_$targetFps"),
+                            color = if (active) CyanNeon.copy(alpha = 0.22f) else CanvasCardBg,
+                            border = BorderStroke(1.dp, if (active) CyanNeon else CardBorder)
                         ) {
                             Text(
                                 text = "${targetFps}fps",
                                 fontFamily = TechMono,
                                 fontSize = 9.sp,
-                                color = if (project.fps == targetFps) CyanNeon else CanvasMutedText,
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                                fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                                color = if (active) CyanNeon else CanvasMutedText,
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp)
                             )
                         }
                     }

@@ -21,16 +21,22 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.Brush
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.ModelTraining
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.ViewInAr
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -71,6 +77,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.AppUiState
@@ -85,9 +92,12 @@ import com.example.model.importer.UniversalAssetImporter
 import com.example.ui.components.AiFileImportReviewCard
 import com.example.ui.components.AutoStyleAuditToggleRow
 import com.example.ui.components.AutoStyleAuditVerdictStrip
+import com.example.ui.components.ForgeChatStudioPanel
 import com.example.ui.components.GeminiEnhancementPanel
+import com.example.ui.components.OmniAiConnectionsSheet
 import com.example.ui.components.QuickAddToGalleryBar
 import com.example.ui.components.RoomAssetHistoryPanel
+import com.example.ui.components.shortProviderName
 import com.example.ui.theme.AmberGold
 import com.example.ui.theme.CardBorder
 import com.example.ui.theme.CyanNeon
@@ -117,6 +127,8 @@ fun ForgeStudioScreen(
     var selectedTab by remember { mutableIntStateOf(0) }
     var spriteRes by remember { mutableIntStateOf(32) }
     var alsoExtrude3D by remember { mutableStateOf(false) }
+    var showOmniAiSheet by remember { mutableStateOf(false) }
+    var omniSheetInitialTab by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(openCreateTabTrigger) {
         if (openCreateTabTrigger > 0) {
@@ -223,6 +235,80 @@ fun ForgeStudioScreen(
             }
         }
 
+        // Always-Visible Active AI Provider Selector Bar (1-tap access from every Forge tab)
+        val routing = uiState.omniAiRouting
+        val activeKnowledgeCount = uiState.knowledgeSources.count { it.enabled }
+        val connectedAiCount = uiState.aiProviderProfiles.count { it.isConnected }
+        Card(
+            shape = RoundedCornerShape(12.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0A1426)),
+            border = androidx.compose.foundation.BorderStroke(1.2.dp, CyanNeon.copy(alpha = 0.65f)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("forge_active_ai_provider_bar")
+        ) {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Hub,
+                            contentDescription = "Active AI Providers",
+                            tint = CyanNeon,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Column {
+                            Text(
+                                text = "ACTIVE AI ROUTING ($connectedAiCount CONNECTED)",
+                                fontFamily = TechMono,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = CyanNeon
+                            )
+                            Text(
+                                text = "Text/Build: ${shortProviderName(routing.activeTextProvider)} • Image: ${shortProviderName(routing.activeImageProvider)} • Sources: $activeKnowledgeCount",
+                                fontFamily = TechMono,
+                                fontSize = 9.sp,
+                                color = Color(0xFFCBD5E1)
+                            )
+                        }
+                    }
+
+                    Button(
+                        onClick = {
+                            omniSheetInitialTab = 0
+                            showOmniAiSheet = true
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = CyanNeon,
+                            contentColor = Color(0xFF031B26)
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .height(40.dp)
+                            .testTag("forge_select_connect_ais_btn")
+                    ) {
+                        Text(
+                            text = "Select / Connect AIs",
+                            fontFamily = TechMono,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+
         // Sub Tabs: 0 = Create New (From Scratch), 1 = Enhance / Variants, 2 = Concept Lab
         TabRow(
             selectedTabIndex = selectedTab,
@@ -290,6 +376,146 @@ fun ForgeStudioScreen(
                             )
                         }
 
+                        // Dual-Mode Creation Segmented Toggle (Studio Form | AI Chat Studio)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color(0xFF070C17))
+                                .border(1.dp, CardBorder, RoundedCornerShape(10.dp))
+                                .padding(4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            val formSelected = uiState.forgeCreateUxMode == 0
+                            Button(
+                                onClick = { viewModel.setForgeCreateUxMode(0) },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (formSelected) EmeraldGreen else Color.Transparent,
+                                    contentColor = if (formSelected) Color(0xFF031B12) else Color(0xFF94A3B8)
+                                ),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(42.dp)
+                                    .testTag("forge_mode_studio_form_btn")
+                            ) {
+                                Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(Modifier.width(5.dp))
+                                Text("Studio Form", fontFamily = TechMono, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Button(
+                                onClick = { viewModel.setForgeCreateUxMode(1) },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (!formSelected) CyanNeon else Color.Transparent,
+                                    contentColor = if (!formSelected) Color(0xFF031B26) else Color(0xFF94A3B8)
+                                ),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(42.dp)
+                                    .testTag("forge_mode_ai_chat_btn")
+                            ) {
+                                Icon(Icons.Default.Chat, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(Modifier.width(5.dp))
+                                Text("AI Chat Studio", fontFamily = TechMono, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        // Compact Unified Training Status Strip (Synced across Form + Chat)
+                        val tProfile = uiState.userAiTrainingProfile
+                        val syncTargets = listOfNotNull(
+                            if (tProfile.applyToFormBuilder) "Form" else null,
+                            if (tProfile.applyToChatStudio) "Chat" else null
+                        ).joinToString(" + ").ifBlank { "Paused" }
+                        val triggerBadge = tProfile.styleTriggerToken.ifBlank { "None" }
+                        Surface(
+                            color = Color(0xFF0A1224),
+                            shape = RoundedCornerShape(10.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, MagentaNeon.copy(alpha = 0.5f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("forge_unified_training_strip")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ModelTraining,
+                                        contentDescription = "Unified Training Status",
+                                        tint = MagentaNeon,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Text(
+                                        text = "Training Synced: $syncTargets • Trigger: $triggerBadge",
+                                        fontFamily = TechMono,
+                                        fontSize = 9.sp,
+                                        color = Color(0xFFE2E8F0)
+                                    )
+                                }
+                                OutlinedButton(
+                                    onClick = {
+                                        omniSheetInitialTab = 1
+                                        showOmniAiSheet = true
+                                    },
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, MagentaNeon),
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MagentaNeon),
+                                    shape = RoundedCornerShape(7.dp),
+                                    modifier = Modifier
+                                        .height(34.dp)
+                                        .testTag("forge_connect_training_btn")
+                                ) {
+                                    Text("Connect Training", fontFamily = TechMono, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+
+                        if (uiState.forgeCreateUxMode == 1) {
+                            // Mode 1: AI Chat Studio + Shared Emerald Result Card
+                            ForgeChatStudioPanel(
+                                uiState = uiState,
+                                viewModel = viewModel
+                            )
+
+                            val chatBuildErr = uiState.lastScratchAiError
+                            if (!chatBuildErr.isNullOrBlank()) {
+                                Surface(
+                                    color = Color(0xFF2B1118),
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFB7185)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = chatBuildErr,
+                                        fontFamily = TechMono,
+                                        fontSize = 11.sp,
+                                        color = Color(0xFFFDA4AF),
+                                        modifier = Modifier.padding(12.dp)
+                                    )
+                                }
+                            }
+
+                            val chatBuildSummary = uiState.lastAiBuildSummary
+                            if (!chatBuildSummary.isNullOrBlank()) {
+                                AiMultiAssetResultCard(
+                                    buildSummary = chatBuildSummary,
+                                    onNavigateTo3D = onNavigateTo3D,
+                                    onNavigateTo3DBuilder = onNavigateTo3DBuilder,
+                                    onNavigateToTextures = onNavigateToTextures,
+                                    onNavigateToAudioVault = onNavigateToAudioVault,
+                                    onNavigateToSprites = onNavigateToSprites,
+                                    onPinTrainingExample = { viewModel.pinActiveAssetAsAiTrainingExample() }
+                                )
+                            }
+                        } else {
                         val activeBuildTarget = uiState.selectedAiBuildTarget
                         val isSpriteTarget = activeBuildTarget == AiBuildTargetKind.SPRITE_2D
 
@@ -600,6 +826,101 @@ fun ForgeStudioScreen(
                         )
                         }
 
+                        // Target Animation FPS Field + Quick Chips (1..120 FPS)
+                        var formFpsDraft by remember(uiState.targetAssetFps) {
+                            mutableStateOf(uiState.targetAssetFps.toString())
+                        }
+                        Surface(
+                            color = Color(0xFF0B1220),
+                            shape = RoundedCornerShape(10.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, CardBorder),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "TARGET ANIMATION FPS (1–120)",
+                                            fontFamily = TechMono,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = AmberGold
+                                        )
+                                        Text(
+                                            text = "Rig Cadence: ${uiState.activeRigMetadata.cadenceFps.label} • Synced to Sheets & Canvas",
+                                            fontFamily = TechMono,
+                                            fontSize = 9.sp,
+                                            color = Color(0xFF94A3B8)
+                                        )
+                                    }
+                                    OutlinedTextField(
+                                        value = formFpsDraft,
+                                        onValueChange = { raw ->
+                                            val digits = raw.filter { it.isDigit() }.take(3)
+                                            formFpsDraft = digits
+                                            digits.toIntOrNull()?.let { parsed ->
+                                                viewModel.updateTargetAssetFps(parsed)
+                                            }
+                                        },
+                                        label = { Text("FPS", fontFamily = TechMono, fontSize = 9.sp) },
+                                        singleLine = true,
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedBorderColor = AmberGold,
+                                            unfocusedBorderColor = CardBorder,
+                                            focusedTextColor = Color.White,
+                                            unfocusedTextColor = Color.White,
+                                            focusedLabelColor = AmberGold,
+                                            unfocusedLabelColor = Color(0xFF94A3B8)
+                                        ),
+                                        modifier = Modifier
+                                            .width(86.dp)
+                                            .testTag("forge_target_fps_input")
+                                    )
+                                }
+
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    listOf(12, 15, 24, 30, 60).forEach { fpsPreset ->
+                                        val selected = uiState.targetAssetFps == fpsPreset
+                                        FilterChip(
+                                            selected = selected,
+                                            onClick = {
+                                                formFpsDraft = fpsPreset.toString()
+                                                viewModel.updateTargetAssetFps(fpsPreset)
+                                            },
+                                            label = {
+                                                Text(
+                                                    text = "$fpsPreset FPS",
+                                                    fontFamily = TechMono,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                                                )
+                                            },
+                                            colors = FilterChipDefaults.filterChipColors(
+                                                selectedContainerColor = AmberGold,
+                                                selectedLabelColor = Color(0xFF1F1300),
+                                                containerColor = Color(0xFF1E293B),
+                                                labelColor = Color.White
+                                            ),
+                                            modifier = Modifier.testTag("forge_target_fps_chip_$fpsPreset")
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
                         // Primary From-Scratch AI Multi-Asset Build CTA
                         Button(
                             onClick = { viewModel.buildBrandNewAssetWithAi(alsoExtrude3D) },
@@ -667,99 +988,15 @@ fun ForgeStudioScreen(
                         // Sleek Emerald Result Card for Latest AI-Built Multi-Asset Creation
                         val buildSummary = uiState.lastAiBuildSummary
                         if (!buildSummary.isNullOrBlank()) {
-                            Surface(
-                                color = Color(0xFF071B16),
-                                shape = RoundedCornerShape(12.dp),
-                                border = androidx.compose.foundation.BorderStroke(1.2.dp, EmeraldGreen.copy(alpha = 0.7f)),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("ai_multi_asset_result_card")
-                            ) {
-                                Column(
-                                    modifier = Modifier.padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.CheckCircle,
-                                            contentDescription = "AI Build Complete",
-                                            tint = EmeraldGreen,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                        Text(
-                                            text = "AI ASSET BUILT & READY TO EDIT",
-                                            fontFamily = TechMono,
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = EmeraldGreen
-                                        )
-                                    }
-                                    Text(
-                                        text = buildSummary,
-                                        fontSize = 11.sp,
-                                        color = Color(0xFFE2E8F0)
-                                    )
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .horizontalScroll(rememberScrollState()),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        val jump3D = onNavigateTo3DBuilder ?: onNavigateTo3D
-                                        if (jump3D != null) {
-                                            OutlinedButton(
-                                                onClick = jump3D,
-                                                border = androidx.compose.foundation.BorderStroke(1.dp, CyanNeon),
-                                                colors = ButtonDefaults.outlinedButtonColors(contentColor = CyanNeon),
-                                                modifier = Modifier.testTag("ai_result_jump_3d_btn")
-                                            ) {
-                                                Icon(Icons.Default.ViewInAr, contentDescription = null, modifier = Modifier.size(14.dp))
-                                                Spacer(Modifier.width(5.dp))
-                                                Text("Edit in 3D Builder", fontFamily = TechMono, fontSize = 10.sp)
-                                            }
-                                        }
-                                        if (onNavigateToTextures != null) {
-                                            OutlinedButton(
-                                                onClick = onNavigateToTextures,
-                                                border = androidx.compose.foundation.BorderStroke(1.dp, AmberGold),
-                                                colors = ButtonDefaults.outlinedButtonColors(contentColor = AmberGold),
-                                                modifier = Modifier.testTag("ai_result_jump_textures_btn")
-                                            ) {
-                                                Icon(Icons.Default.Palette, contentDescription = null, modifier = Modifier.size(14.dp))
-                                                Spacer(Modifier.width(5.dp))
-                                                Text("Edit in Texture Studio", fontFamily = TechMono, fontSize = 10.sp)
-                                            }
-                                        }
-                                        if (onNavigateToAudioVault != null) {
-                                            OutlinedButton(
-                                                onClick = onNavigateToAudioVault,
-                                                border = androidx.compose.foundation.BorderStroke(1.dp, MagentaNeon),
-                                                colors = ButtonDefaults.outlinedButtonColors(contentColor = MagentaNeon),
-                                                modifier = Modifier.testTag("ai_result_jump_audio_btn")
-                                            ) {
-                                                Icon(Icons.Default.MusicNote, contentDescription = null, modifier = Modifier.size(14.dp))
-                                                Spacer(Modifier.width(5.dp))
-                                                Text("Audition in Audio Vault", fontFamily = TechMono, fontSize = 10.sp)
-                                            }
-                                        }
-                                        if (onNavigateToSprites != null) {
-                                            OutlinedButton(
-                                                onClick = onNavigateToSprites,
-                                                border = androidx.compose.foundation.BorderStroke(1.dp, EmeraldGreen),
-                                                colors = ButtonDefaults.outlinedButtonColors(contentColor = EmeraldGreen),
-                                                modifier = Modifier.testTag("ai_result_jump_sprites_btn")
-                                            ) {
-                                                Icon(Icons.Default.GridView, contentDescription = null, modifier = Modifier.size(14.dp))
-                                                Spacer(Modifier.width(5.dp))
-                                                Text("View in Sprite Studio", fontFamily = TechMono, fontSize = 10.sp)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            AiMultiAssetResultCard(
+                                buildSummary = buildSummary,
+                                onNavigateTo3D = onNavigateTo3D,
+                                onNavigateTo3DBuilder = onNavigateTo3DBuilder,
+                                onNavigateToTextures = onNavigateToTextures,
+                                onNavigateToAudioVault = onNavigateToAudioVault,
+                                onNavigateToSprites = onNavigateToSprites,
+                                onPinTrainingExample = { viewModel.pinActiveAssetAsAiTrainingExample() }
+                            )
                         }
 
                         // Live Preview of Newly Generated From-Scratch Asset
@@ -866,6 +1103,7 @@ fun ForgeStudioScreen(
                                 )
                             }
                         }
+                        } // end Studio Form mode
                     }
                 }
             }
@@ -1127,5 +1365,129 @@ fun ForgeStudioScreen(
             onSaveCurrentSnapshotToHistory = { viewModel.saveCurrentStudioStateToRoomHistory() },
             onClearAllHistory = { viewModel.clearRoomAssetHistory() }
         )
+    }
+
+    if (showOmniAiSheet) {
+        OmniAiConnectionsSheet(
+            uiState = uiState,
+            viewModel = viewModel,
+            onDismiss = { showOmniAiSheet = false },
+            initialTab = omniSheetInitialTab
+        )
+    }
+}
+
+@Composable
+private fun AiMultiAssetResultCard(
+    buildSummary: String,
+    onNavigateTo3D: (() -> Unit)?,
+    onNavigateTo3DBuilder: (() -> Unit)?,
+    onNavigateToTextures: (() -> Unit)?,
+    onNavigateToAudioVault: (() -> Unit)?,
+    onNavigateToSprites: (() -> Unit)?,
+    onPinTrainingExample: () -> Unit
+) {
+    Surface(
+        color = Color(0xFF071B16),
+        shape = RoundedCornerShape(12.dp),
+        border = androidx.compose.foundation.BorderStroke(1.2.dp, EmeraldGreen.copy(alpha = 0.7f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("ai_multi_asset_result_card")
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CheckCircle,
+                    contentDescription = "AI Build Complete",
+                    tint = EmeraldGreen,
+                    modifier = Modifier.size(16.dp)
+                )
+                Text(
+                    text = "AI ASSET BUILT & READY TO EDIT",
+                    fontFamily = TechMono,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = EmeraldGreen
+                )
+            }
+            Text(
+                text = buildSummary,
+                fontSize = 11.sp,
+                color = Color(0xFFE2E8F0)
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onPinTrainingExample,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MagentaNeon),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MagentaNeon),
+                    modifier = Modifier.testTag("ai_result_pin_training_btn")
+                ) {
+                    Icon(Icons.Default.BookmarkAdd, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("Pin as AI Training Example", fontFamily = TechMono, fontSize = 10.sp)
+                }
+                val jump3D = onNavigateTo3DBuilder ?: onNavigateTo3D
+                if (jump3D != null) {
+                    OutlinedButton(
+                        onClick = jump3D,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, CyanNeon),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = CyanNeon),
+                        modifier = Modifier.testTag("ai_result_jump_3d_btn")
+                    ) {
+                        Icon(Icons.Default.ViewInAr, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("Edit in 3D Builder", fontFamily = TechMono, fontSize = 10.sp)
+                    }
+                }
+                if (onNavigateToTextures != null) {
+                    OutlinedButton(
+                        onClick = onNavigateToTextures,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, AmberGold),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = AmberGold),
+                        modifier = Modifier.testTag("ai_result_jump_textures_btn")
+                    ) {
+                        Icon(Icons.Default.Palette, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("Edit in Texture Studio", fontFamily = TechMono, fontSize = 10.sp)
+                    }
+                }
+                if (onNavigateToAudioVault != null) {
+                    OutlinedButton(
+                        onClick = onNavigateToAudioVault,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, MagentaNeon),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MagentaNeon),
+                        modifier = Modifier.testTag("ai_result_jump_audio_btn")
+                    ) {
+                        Icon(Icons.Default.MusicNote, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("Audition in Audio Vault", fontFamily = TechMono, fontSize = 10.sp)
+                    }
+                }
+                if (onNavigateToSprites != null) {
+                    OutlinedButton(
+                        onClick = onNavigateToSprites,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, EmeraldGreen),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = EmeraldGreen),
+                        modifier = Modifier.testTag("ai_result_jump_sprites_btn")
+                    ) {
+                        Icon(Icons.Default.GridView, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("View in Sprite Studio", fontFamily = TechMono, fontSize = 10.sp)
+                    }
+                }
+            }
+        }
     }
 }

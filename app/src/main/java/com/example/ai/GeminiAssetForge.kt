@@ -593,8 +593,10 @@ object GeminiAssetForge {
         sharedContextBlock: String = "",
         autoStripChromaKey: Boolean = true,
         alsoExtrude3D: Boolean = false,
-        autoRetryOnStyleFail: Boolean = true
+        autoRetryOnStyleFail: Boolean = true,
+        targetFps: Int = 15
     ): BrandNewAssetResult {
+        val safeFps = targetFps.coerceIn(1, 120)
         val cleanSubject = subjectDescription.trim()
         if (cleanSubject.isBlank()) {
             throw IllegalArgumentException(
@@ -616,7 +618,8 @@ object GeminiAssetForge {
             paletteHexList = paletteHexList,
             gameTag = gameTag,
             groupTag = groupTag,
-            characterTag = characterTag
+            characterTag = characterTag,
+            targetFps = safeFps
         )
 
         suspend fun generateScratchBitmap(activePrompt: String) = OmniAiRouter.generateImageBitmap(
@@ -709,16 +712,19 @@ object GeminiAssetForge {
             sourceSizeLabel = "${processedBitmap.width}×${processedBitmap.height}px • ${cols}×${rows}"
         )
 
-        val finalSheet = if (cols * rows > 1) {
+        val slicedSheet = if (cols * rows > 1) {
             val aligned = FootAlignedSlicerEngine.sliceAndFootAlignSheet(
                 sheet = rawSheet,
-                cadenceFps = FrameCadenceFps.FPS_15,
+                cadenceFps = AiTrainingDatasetExporter.nearestRigCadence(safeFps),
                 paddingPx = 2
             )
             aligned.alignedSheet.copy(sourceKindLabel = "AI SCRATCH CREATION")
         } else {
             rawSheet
         }
+        val finalSheet = slicedSheet.copy(
+            animations = slicedSheet.animations.map { anim -> anim.copy(fps = safeFps) }
+        )
 
         val extrudedMesh = if (alsoExtrude3D) {
             val primaryFrame = finalSheet.frames.firstOrNull() ?: processedBitmap

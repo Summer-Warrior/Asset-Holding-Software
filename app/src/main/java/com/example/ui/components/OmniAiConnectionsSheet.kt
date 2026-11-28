@@ -2,6 +2,7 @@ package com.example.ui.components
 
 import android.content.Intent
 import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -26,15 +27,19 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.DataObject
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Login
+import androidx.compose.material.icons.filled.ModelTraining
 import androidx.compose.material.icons.filled.NoteAdd
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -110,16 +115,36 @@ import com.example.ui.theme.TechMono
 fun OmniAiConnectionsSheet(
     uiState: AppUiState,
     viewModel: MainViewModel,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    initialTab: Int = 0
 ) {
     val context = LocalContext.current
-    var selectedTab by remember { mutableIntStateOf(0) }
+    var selectedTab by remember(initialTab) { mutableIntStateOf(initialTab.coerceIn(0, 1)) }
 
     val documentPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
             viewModel.importLocalKnowledgeDocument(context, uri)
+        }
+    }
+
+    val trainingFilePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            val resolvedName = try {
+                context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (idx >= 0) cursor.getString(idx) else null
+                    } else null
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("OmniAiConnectionsSheet", "Could not query display name: ${e.message}")
+                uri.lastPathSegment
+            } ?: "user_training_file.jsonl"
+            viewModel.importUserTrainingFileToSharedContext(context, uri, resolvedName)
         }
     }
 
@@ -282,6 +307,9 @@ fun OmniAiConnectionsSheet(
                             viewModel = viewModel,
                             onPickLocalFile = {
                                 documentPickerLauncher.launch(arrayOf("text/*", "application/json", "*/*"))
+                            },
+                            onPickTrainingFile = {
+                                trainingFilePickerLauncher.launch("*/*")
                             }
                         )
                     }
@@ -899,14 +927,23 @@ private fun ProviderConnectionCard(
 private fun KnowledgeSourcesTabContent(
     uiState: AppUiState,
     viewModel: MainViewModel,
-    onPickLocalFile: () -> Unit
+    onPickLocalFile: () -> Unit,
+    onPickTrainingFile: () -> Unit
 ) {
+    val context = LocalContext.current
     var showUrlForm by remember { mutableStateOf(false) }
     var showPasteForm by remember { mutableStateOf(false) }
     var urlInput by remember { mutableStateOf("") }
     var urlTitleInput by remember { mutableStateOf("") }
     var pasteTitleInput by remember { mutableStateOf("") }
     var pasteBodyInput by remember { mutableStateOf("") }
+
+    val profile = uiState.userAiTrainingProfile
+    var triggerDraft by remember(profile.styleTriggerToken) { mutableStateOf(profile.styleTriggerToken) }
+    var loraTagDraft by remember(profile.customLoraOrModelTag) { mutableStateOf(profile.customLoraOrModelTag) }
+    var trainingNotesDraft by remember(profile.customTrainingNotes) { mutableStateOf(profile.customTrainingNotes) }
+    var syncFormDraft by remember(profile.applyToFormBuilder) { mutableStateOf(profile.applyToFormBuilder) }
+    var syncChatDraft by remember(profile.applyToChatStudio) { mutableStateOf(profile.applyToChatStudio) }
 
     val assembledPreview = remember(
         uiState.knowledgeSources,
@@ -924,6 +961,230 @@ private fun KnowledgeSourcesTabContent(
     val maxChars = MultiSourceContextRegistry.DEFAULT_MAX_CONTEXT_CHARS
     val approxTokens = (usedChars / 4).coerceAtLeast(if (usedChars > 0) 1 else 0)
     val budgetRatio = (usedChars.toFloat() / maxChars.toFloat()).coerceIn(0f, 1f)
+
+    // Unified User Training Profile & Dataset Exporter Card (Synced to Form + Chat)
+    Card(
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF0A1426)),
+        border = BorderStroke(1.3.dp, MagentaNeon.copy(alpha = 0.65f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("omni_user_training_profile_card")
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ModelTraining,
+                        contentDescription = null,
+                        tint = MagentaNeon,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "CONNECT YOUR OWN TRAINING (SYNCED TO FORM + CHAT)",
+                        fontFamily = TechMono,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MagentaNeon
+                    )
+                }
+                if (profile.attachedTrainingFileCount > 0) {
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = EmeraldGreen.copy(alpha = 0.16f)
+                    ) {
+                        Text(
+                            text = "${profile.attachedTrainingFileCount} FILE(S)",
+                            fontFamily = TechMono,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = EmeraldGreen,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+            }
+
+            OutlinedTextField(
+                value = triggerDraft,
+                onValueChange = { triggerDraft = it },
+                label = { Text("Style / LoRA Trigger Token (e.g., mpv_truefusion)", fontFamily = TechMono, fontSize = 9.sp) },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("training_trigger_token_input"),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = MagentaNeon,
+                    unfocusedBorderColor = CardBorder,
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White,
+                    focusedLabelColor = MagentaNeon,
+                    unfocusedLabelColor = Color(0xFF94A3B8)
+                )
+            )
+
+            OutlinedTextField(
+                value = loraTagDraft,
+                onValueChange = { loraTagDraft = it },
+                label = { Text("Custom LoRA / Fine-Tuned Model Tag (e.g., <lora:mpv_cel:0.85>)", fontFamily = TechMono, fontSize = 9.sp) },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("training_lora_tag_input"),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = CyanNeon,
+                    unfocusedBorderColor = CardBorder,
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White,
+                    focusedLabelColor = CyanNeon,
+                    unfocusedLabelColor = Color(0xFF94A3B8)
+                )
+            )
+
+            OutlinedTextField(
+                value = trainingNotesDraft,
+                onValueChange = { trainingNotesDraft = it },
+                label = { Text("Custom Training Directives (Rules, Proportions, Palette, Lore)", fontFamily = TechMono, fontSize = 9.sp) },
+                minLines = 2,
+                maxLines = 4,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("training_notes_input"),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = EmeraldGreen,
+                    unfocusedBorderColor = CardBorder,
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White,
+                    focusedLabelColor = EmeraldGreen,
+                    unfocusedLabelColor = Color(0xFF94A3B8)
+                )
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Sync to Studio Form", fontFamily = TechMono, fontSize = 9.sp, color = Color.White)
+                    Switch(
+                        checked = syncFormDraft,
+                        onCheckedChange = { syncFormDraft = it },
+                        colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF031B26), checkedTrackColor = EmeraldGreen),
+                        modifier = Modifier.testTag("training_sync_form_switch")
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Sync to AI Chat", fontFamily = TechMono, fontSize = 9.sp, color = Color.White)
+                    Switch(
+                        checked = syncChatDraft,
+                        onCheckedChange = { syncChatDraft = it },
+                        colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF031B26), checkedTrackColor = CyanNeon),
+                        modifier = Modifier.testTag("training_sync_chat_switch")
+                    )
+                }
+            }
+
+            Button(
+                onClick = {
+                    viewModel.updateUserAiTrainingProfile(
+                        context = context,
+                        triggerToken = triggerDraft,
+                        customLoraOrModelTag = loraTagDraft,
+                        trainingNotes = trainingNotesDraft,
+                        applyToForm = syncFormDraft,
+                        applyToChat = syncChatDraft
+                    )
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = MagentaNeon, contentColor = Color.White),
+                shape = RoundedCornerShape(9.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .testTag("save_training_profile_btn")
+            ) {
+                Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(15.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Save Training Profile", fontFamily = TechMono, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
+
+            OutlinedButton(
+                onClick = onPickTrainingFile,
+                border = BorderStroke(1.dp, EmeraldGreen),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = EmeraldGreen),
+                shape = RoundedCornerShape(9.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .testTag("import_user_training_file_btn")
+            ) {
+                Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(15.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Import Training File (.jsonl / .json / .md / .txt)", fontFamily = TechMono, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            }
+
+            OutlinedButton(
+                onClick = { viewModel.pinActiveAssetAsAiTrainingExample() },
+                border = BorderStroke(1.dp, AmberGold),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = AmberGold),
+                shape = RoundedCornerShape(9.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(42.dp)
+                    .testTag("pin_active_asset_training_btn")
+            ) {
+                Icon(Icons.Default.BookmarkAdd, contentDescription = null, modifier = Modifier.size(15.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Pin Active Asset as Example", fontFamily = TechMono, fontSize = 10.sp)
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = { viewModel.prepareLoraTrainingManifestExport(triggerDraft) },
+                    border = BorderStroke(1.dp, CyanNeon),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = CyanNeon),
+                    shape = RoundedCornerShape(9.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(42.dp)
+                        .testTag("export_lora_manifest_btn")
+                ) {
+                    Icon(Icons.Default.DataObject, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Export LoRA (.json)", fontFamily = TechMono, fontSize = 8.sp)
+                }
+
+                OutlinedButton(
+                    onClick = { viewModel.prepareJsonlFineTuneExport() },
+                    border = BorderStroke(1.dp, EmeraldGreen),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = EmeraldGreen),
+                    shape = RoundedCornerShape(9.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(42.dp)
+                        .testTag("export_jsonl_finetune_btn")
+                ) {
+                    Icon(Icons.Default.DataObject, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Export Fine-Tune (.jsonl)", fontFamily = TechMono, fontSize = 8.sp)
+                }
+            }
+        }
+    }
 
     // Live Token / Char Budget Card
     Card(
